@@ -311,6 +311,7 @@ else:
             "FlaxStableDiffusionImg2ImgPipeline",
             "FlaxStableDiffusionInpaintPipeline",
             "FlaxStableDiffusionPipeline",
+            "FlaxStableDiffusionInstructPix2PixPipeline",
         ]
     )
     _import_structure["stable_diffusion_xl"].extend(
@@ -551,6 +552,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
                 FlaxStableDiffusionImg2ImgPipeline,
                 FlaxStableDiffusionInpaintPipeline,
                 FlaxStableDiffusionPipeline,
+                FlaxStableDiffusionInstructPix2PixPipeline,
             )
             from .stable_diffusion_xl import (
                 FlaxStableDiffusionXLPipeline,

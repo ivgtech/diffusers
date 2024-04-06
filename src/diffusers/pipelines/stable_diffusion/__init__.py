@@ -97,6 +97,7 @@ if is_transformers_available() and is_flax_available():
     _additional_imports.update({"PNDMSchedulerState": PNDMSchedulerState})
     _import_structure["pipeline_flax_stable_diffusion"] = ["FlaxStableDiffusionPipeline"]
     _import_structure["pipeline_flax_stable_diffusion_img2img"] = ["FlaxStableDiffusionImg2ImgPipeline"]
+    _import_structure["pipeline_flax_stable_diffusion_instruct_pix2pix"] = ["FlaxStableDiffusionInstructPix2PixPipeline"]
     _import_structure["pipeline_flax_stable_diffusion_inpaint"] = ["FlaxStableDiffusionInpaintPipeline"]
     _import_structure["safety_checker_flax"] = ["FlaxStableDiffusionSafetyChecker"]
 
@@ -180,6 +181,9 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .pipeline_flax_stable_diffusion import FlaxStableDiffusionPipeline
         from .pipeline_flax_stable_diffusion_img2img import (
             FlaxStableDiffusionImg2ImgPipeline,
+        )
+        from .pipeline_flax_stable_diffusion_instruct_pix2pix import (
+            FlaxStableDiffusionInstructPix2PixPipeline,
         )
         from .pipeline_flax_stable_diffusion_inpaint import (
             FlaxStableDiffusionInpaintPipeline,
