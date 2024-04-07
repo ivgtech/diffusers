@@ -14,6 +14,7 @@ from typing import Any, Dict, Union
 import jax
 import jax.numpy as jnp
 from jax import pmap
+import numpy as np 
 # Let's cache the model compilation, so that it doesn't take as long the next time around.
 # from jax.experimental.compilation_cache import compilation_cache as cc
 # cc.initialize_cache("/tmp/sdxl_cache")
@@ -66,7 +67,6 @@ from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecke
 from diffusers.models.modeling_flax_pytorch_utils import convert_pytorch_state_dict_to_flax
 from diffusers.models.modeling_utils import load_state_dict
 
-
 # local imports
 from flax_from_hf_pretrained_april4 import get_pretrained
 from model_converter import load_from_standard_weights
@@ -79,16 +79,284 @@ MODEL_NAME="CompVis/stable-diffusion-v1-4",
 MODEL_NAME="duongna/stable-diffusion-v1-4-flax"
 MODEL_NAME="runwayml/stable-diffusion-v1-5"
 
-from diffusers import DiffusionPipeline
 pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
     MODEL_NAME,
     revision="flax",
     dtype=dtype,
 )
 
+# %%
+
+# Save flax pipeline to disk as a local pipeline
+
+outdir = '../flax_models/stable-diffusion-v1-5'
+
+scheduler, _ = FlaxPNDMScheduler.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="scheduler")
+safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
+    "CompVis/stable-diffusion-safety-checker", from_pt=True
+)
+pipeline = FlaxStableDiffusionPipeline(
+    text_encoder=pipeline.text_encoder,
+    vae=pipeline.vae,
+    unet=pipeline.unet,
+    tokenizer=pipeline.tokenizer, # FlaxPreTrainedModel.save_pretrained of PreTrainedTokenizer
+    scheduler=scheduler,
+    safety_checker=safety_checker,
+    feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
+)
+# %% 
+# NOTE: three possible library classes each have two possible save pretrained methods:
+# library_classes
+# {'FlaxModelMixin': ['save_pretrained', 'from_pretrained'], 'FlaxSchedulerMixin': ['save_pretrained', 'from_pretrained'], 'FlaxDiffusionPipeline': ['save_pretrained', 'from_pretrained']}
+# save_load_methods
+# ['save_pretrained', 'from_pretrained']
+
+#  for vae, the save_method is = FlaxModelMixin.save_pretrained , 
+#  save_directory =  '../flax_models/stable-diffusion-v1-5', pipeline_component_name = 'vae', expects_params=True, 
+#  which is called here:
+# if expects_params:
+# save_method( # os.path.join(save_directory, pipeline_component_name), params=params[pipeline_component_name])
+
+
+pipeline.save_pretrained(
+    outdir,
+    params={
+        "text_encoder": params["text_encoder"],  # FlaxPreTrainedModel.save_pretrained
+        "vae": params["vae"],
+        "unet": params["unet"],
+        "safety_checker": safety_checker.params,
+    },
+)
+
+
 
 
 # %%
+#                                                                Pytorch weights
+################################################################################
+
+
+dtype = jnp.bfloat16
+
+from diffusers import FlaxEulerDiscreteScheduler
+#scheduler, _ = FlaxEulerDiscreteScheduler.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="scheduler")
+
+scheduler, scheduler_state = FlaxEulerDiscreteScheduler.from_pretrained(
+    'runwayml/stable-diffusion-v1-5',
+    subfolder="scheduler",
+
+)
+
+pipeline, params  = FlaxStableDiffusionPipeline.from_pretrained(
+    'timbrooks/instruct-pix2pix',
+    scheduler=scheduler, # over
+    from_pt=True,
+)
+
+outdir = '../gatech/instruct-pix2pix'
+
+safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
+    "CompVis/stable-diffusion-safety-checker", from_pt=True
+)
+
+# %% 
+
+pipeline = FlaxStableDiffusionPipeline(
+    text_encoder=pipeline.text_encoder,
+    vae=pipeline.vae,
+    unet=pipeline.unet,
+    tokenizer=pipeline.tokenizer, # FlaxPreTrainedModel.save_pretrained of PreTrainedTokenizer
+    scheduler=scheduler, # FlaxSchedulerMixin.save_pretrained of FlaxEulerDiscreteScheduler 
+    safety_checker=safety_checker,
+    feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
+)
+# %% 
+
+
+pipeline.save_pretrained(
+    outdir,
+    params={
+        "text_encoder": params["text_encoder"],  # FlaxPreTrainedModel.save_pretrained
+        "vae": params["vae"],
+        "unet": params["unet"],
+        "safety_checker": safety_checker.params,
+    },
+)
+
+
+
+# %% 
+
+
+
+# Load models and create wrapper for stable diffusion
+tokenizer = CLIPTokenizer.from_pretrained(
+    'runwayml/stable-diffusion-v1-5',
+    revision="flax",
+    subfolder="tokenizer",
+)
+
+text_encoder = FlaxCLIPTextModel.from_pretrained(
+    'runwayml/stable-diffusion-v1-5',
+    revision="flax",
+    subfolder="text_encoder",
+)
+vae, vae_state = FlaxAutoencoderKL.from_pretrained(
+    'runwayml/stable-diffusion-v1-5',
+    revision="flax",
+    subfolder="vae",
+)
+
+# %% 
+import torch
+from diffusers import EulerAncestralDiscreteScheduler, FlaxEulerDiscreteScheduler
+
+scheduler, scheduler_state = FlaxEulerDiscreteScheduler.from_pretrained(
+    'timbrooks/instruct-pix2pix',
+    from_pt=True,
+    revision='main',
+    subfolder='scheduler',
+)
+
+from diffusers import UNet2DConditionModel
+unet, unet_state = FlaxUNet2DConditionModel.from_pretrained(
+    'timbrooks/instruct-pix2pix',
+    from_pt=True,
+    revision='main',
+    subfolder='unet',
+)
+
+# %%
+safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
+    "CompVis/stable-diffusion-safety-checker", from_pt=True
+)
+
+pipeline = FlaxStableDiffusionPipeline(
+    text_encoder=text_encoder,
+    vae=vae,
+    unet=unet,
+    tokenizer=tokenizer, # FlaxPreTrainedModel.save_pretrained of PreTrainedTokenizer
+    scheduler=scheduler, # FlaxSchedulerMixin.save_pretrained of FlaxEulerDiscreteScheduler 
+    safety_checker=safety_checker,
+    feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
+)
+
+# %% 
+
+text_encoder_state = text_encoder._params
+
+outdir = '../flax_models/instruct-pix2pix'
+
+pipeline.save_pretrained(
+    outdir,
+    params={
+        "text_encoder": text_encoder_state,  # FlaxPreTrainedModel.save_pretrained
+        "vae": vae_state,
+        "unet": unet_state,
+        "safety_checker": safety_checker.params,
+    },
+)
+####################################################################################################################################
+
+# %%
+
+dtype = jnp.bfloat16
+pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5",
+    revision="flax",
+    dtype=dtype,
+)
+
+# %%
+
+# Save flax pipeline to disk as a local pipeline
+
+outdir = '../flax_models/stable-diffusion-v1-5'
+
+scheduler, _ = FlaxPNDMScheduler.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="scheduler")
+safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
+    "CompVis/stable-diffusion-safety-checker", from_pt=True
+)
+pipeline = FlaxStableDiffusionPipeline(
+    text_encoder=pipeline.text_encoder,
+    vae=pipeline.vae,
+    unet=pipeline.unet,
+    tokenizer=pipeline.tokenizer, # FlaxPreTrainedModel.save_pretrained of PreTrainedTokenizer
+    scheduler=scheduler,
+    safety_checker=safety_checker,
+    feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
+)
+# %% 
+
+pipeline.save_pretrained(
+    outdir,
+    params={
+        "text_encoder": params["text_encoder"],  # FlaxPreTrainedModel.save_pretrained
+        "vae": params["vae"],
+        "unet": params["unet"],
+        "safety_checker": safety_checker.params,
+    },
+)
+
+
+################################################################################
+
+# %%
+                                                                # Flax inference
+################################################################################
+
+import jax
+import jax.numpy as jnp
+from jax import pmap
+from flax.jax_utils import replicate
+from flax.training.common_utils import shard
+from diffusers import FlaxStableDiffusionPipeline
+def create_key(seed=0):
+    return jax.random.PRNGKey(seed)
+
+dtype = jnp.bfloat16
+pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
+  # '../flax_models/stable-diffusion-v1-5',
+  '../flax_models/stable-diffusion-v1-5',
+  revision="flax",
+  dtype=dtype,
+)
+
+prompt = "A cinematic film still of Morgan Freeman starring as Jimi Hendrix, portrait, 40mm lens, shallow depth of field, close up, split lighting, cinematic"
+prompt = [prompt] * jax.device_count()
+prompt_ids = pipeline.prepare_inputs(prompt)
+prompt_ids.shape
+# (8, 77)
+
+# parameters
+p_params = replicate(params)
+
+# arrays
+prompt_ids = shard(prompt_ids)
+prompt_ids.shape
+# (8, 1, 77)
+
+rng = create_key(0)
+rng = jax.random.split(rng, jax.device_count())
+
+images = pipeline(prompt_ids, p_params, rng, jit=True)[0]
+
+# CPU times: user 56.2 s, sys: 42.5 s, total: 1min 38s
+# Wall time: 1min 29s
+
+from diffusers.utils import make_image_grid
+
+images = images.reshape((images.shape[0] * images.shape[1],) + images.shape[-3:])
+images = pipeline.numpy_to_pil(images)
+make_image_grid(images, rows=1, cols=4)
+# %%
+
+
+
+# %%
+                                                                # Flax inference
+################################################################################
+
 import jax
 import jax.numpy as jnp
 from flax.jax_utils import replicate
@@ -153,139 +421,3 @@ output_images = pipeline.numpy_to_pil(np.asarray(output.reshape((num_samples,) +
 
 
 
-
-# %%
-
-import torch
-
-# load the pipeline
-# pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-#     "runwayml/stable-diffusion-v1-5",
-#     torch_dtype=torch.float16,
-# )
-scheduler, schduler_params = FlaxDDPMScheduler.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="scheduler", dtype=jnp.bfloat16)
-text_encoder = FlaxCLIPTextModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder='text_encoder', dtype=jnp.bfloat16)
-tokenizer = CLIPTokenizer.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder='tokenizer', dtype=jnp.bfloat16)
-vae, vae_params = get_pretrained("runwayml/stable-diffusion-v1-5", 'vae', FlaxAutoencoderKL)
-unet, unet_params = get_pretrained("runwayml/stable-diffusion-v1-5", 'unet', FlaxUNet2DConditionModel)
-
-outdir = '../flax_models/stable-diffusion-v1-5'
-scheduler, _ = FlaxPNDMScheduler.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="scheduler")
-safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
-    "CompVis/stable-diffusion-safety-checker", from_pt=True
-)
-
-pipeline = FlaxStableDiffusionPipeline(
-    text_encoder=text_encoder,
-    vae=vae,
-    unet=unet,
-    tokenizer=tokenizer,
-    scheduler=scheduler,
-    safety_checker=safety_checker,
-    feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
-)
-# %% 
-
-def get_params_to_save(params):
-    return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
-
-
-pipeline.save_pretrained(
-    outdir,
-    params={
-        "text_encoder": None, 
-        "vae": vae_params, 
-        "unet": unet_params,
-        "safety_checker": safety_checker.params,
-    },
-)
-
-
-
-
-# %%
-
-
-
-
-
-# %%
-
-
-# flax model saved to disk from flax pipeline (working)
-
-outdir = '../flax_models/stable-diffusion-v1-5'
-
-scheduler, _ = FlaxPNDMScheduler.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="scheduler")
-safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
-    "CompVis/stable-diffusion-safety-checker", from_pt=True
-)
-pipeline = FlaxStableDiffusionPipeline(
-    text_encoder=pipeline.text_encoder,
-    vae=pipeline.vae,
-    unet=pipeline.unet,
-    tokenizer=pipeline.tokenizer,
-    scheduler=scheduler,
-    safety_checker=safety_checker,
-    feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
-)
-
-pipeline.save_pretrained(
-    outdir,
-    params={
-        "text_encoder": params["text_encoder"],
-        "vae": params["vae"],
-        "unet": params["unet"],
-        "safety_checker": safety_checker.params,
-    },
-)
-
-
-
-
-# %%
-
-import jax
-import jax.numpy as jnp
-from jax import pmap
-from flax.jax_utils import replicate
-from flax.training.common_utils import shard
-from diffusers import FlaxStableDiffusionPipeline
-def create_key(seed=0):
-    return jax.random.PRNGKey(seed)
-
-dtype = jnp.bfloat16
-pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
-  '../flax_models/stable-diffusion-v1-5',
-  revision="flax",
-  dtype=dtype,
-)
-
-prompt = "A cinematic film still of Morgan Freeman starring as Jimi Hendrix, portrait, 40mm lens, shallow depth of field, close up, split lighting, cinematic"
-prompt = [prompt] * jax.device_count()
-prompt_ids = pipeline.prepare_inputs(prompt)
-prompt_ids.shape
-# (8, 77)
-
-# parameters
-p_params = replicate(params)
-
-# arrays
-prompt_ids = shard(prompt_ids)
-prompt_ids.shape
-# (8, 1, 77)
-
-rng = create_key(0)
-rng = jax.random.split(rng, jax.device_count())
-
-images = pipeline(prompt_ids, p_params, rng, jit=True)[0]
-
-# CPU times: user 56.2 s, sys: 42.5 s, total: 1min 38s
-# Wall time: 1min 29s
-
-from diffusers.utils import make_image_grid
-
-images = images.reshape((images.shape[0] * images.shape[1],) + images.shape[-3:])
-images = pipeline.numpy_to_pil(images)
-make_image_grid(images, rows=1, cols=4)
-# %%
