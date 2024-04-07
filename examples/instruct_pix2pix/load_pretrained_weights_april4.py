@@ -17,11 +17,12 @@ from jax import pmap
 # Let's cache the model compilation, so that it doesn't take as long the next time around.
 # from jax.experimental.compilation_cache import compilation_cache as cc
 # cc.initialize_cache("/tmp/sdxl_cache")
+
 NUM_DEVICES = jax.device_count()
 
 from flax.jax_utils import replicate
 from flax.training.common_utils import shard
-from flax.core.frozen_dict import FrozenDict, unfreeze
+from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
 from flax.serialization import from_bytes, to_bytes
 from flax.traverse_util import flatten_dict, unflatten_dict
 
@@ -42,11 +43,26 @@ from diffusers.utils import (
     WEIGHTS_NAME,
     PushToHubMixin,
 )
-from diffusers import FlaxAutoencoderKL, FlaxUNet2DConditionModel, FlaxDDPMScheduler
-from diffusers.models.modeling_utils import load_state_dict 
-from diffusers import StableDiffusionInstructPix2PixPipeline, EulerAncestralDiscreteScheduler, UNet2DConditionModel, AutoencoderKL
-from transformers import FlaxCLIPTextModel, CLIPTokenizer
-from diffusers import FlaxAutoencoderKL, FlaxUNet2DConditionModel, FlaxDDPMScheduler
+
+from transformers import (
+    CLIPImageProcessor,
+    CLIPTokenizer, 
+    FlaxCLIPTextModel
+    )
+from diffusers import (
+    FlaxAutoencoderKL,
+    FlaxDDPMScheduler,
+    FlaxDDIMScheduler,
+    FlaxDPMSolverMultistepScheduler,
+    FlaxLMSDiscreteScheduler,
+    FlaxPNDMScheduler,
+    FlaxStableDiffusionPipeline,
+    FlaxUNet2DConditionModel,
+    FlaxStableDiffusionImg2ImgPipeline,
+    FlaxStableDiffusionInstructPix2PixPipeline,
+  )
+
+from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecker
 from diffusers.models.modeling_flax_pytorch_utils import convert_pytorch_state_dict_to_flax
 from diffusers.models.modeling_utils import load_state_dict
 
@@ -71,7 +87,7 @@ def download_pretrained_weights(model_url: str, download_dir: str, model_name: s
     except Exception as e:
         print(f"Error downloading model: {e}")
         sys.exit(1)
-      
+
 # %%
 # 
 # (A) Initial setup
@@ -103,14 +119,18 @@ unet, unet_params = get_pretrained("timbrooks/instruct-pix2pix", 'unet', FlaxUNe
 # Save the Flax unet, vae, text_encoder and scheduler models and their configuration files to a directory 
 # so that they can be reloaded using the [`~FlaxModelMixin.from_pretrained`] class method.
 
-unet.save_pretrained(params=unet_params,save_directory='../flax_models/unet' )
-vae.save_pretrained(params=vae_params,save_directory='../flax_models/vae' )
-scheduler.save_pretrained(params=schduler_params,save_directory='../flax_models/scheduler' )
-text_encoder.save_pretrained(save_directory='../flax_models/text_encoder' )
+
+unet_params = freeze(unet_params)
+vae_params = freeze(vae_params)
+
+unet.save_pretrained(params=unet_params,save_directory='../gatech/instruct-pix2pix/unet' )
+vae.save_pretrained(params=vae_params,save_directory='../gatech/instruct-pix2pix/vae' )
+scheduler.save_pretrained(params=schduler_params,save_directory='../gatech/instruct-pix2pix/scheduler' )
+text_encoder.save_pretrained(save_directory='../gatech/instruct-pix2pix/text_encoder' )
 
 # Either save the tokenizer files (without -r to avoid sym linking issues) or reload from the huggingface hub each time
-os.makedirs("../flax_models/tokenizer", exist_ok=True)
-os.system("cp ~/.cache/huggingface/hub/models--timbrooks--instruct-pix2pix/snapshots/31519b5cb02a7fd89b906d88731cd4d6a7bbf88d/tokenizer/* ../flax_models/tokenizer")    
+os.makedirs("../gatech/instruct-pix2pix/tokenizer", exist_ok=True)
+os.system("cp ~/.cache/huggingface/hub/models--timbrooks--instruct-pix2pix/snapshots/31519b5cb02a7fd89b906d88731cd4d6a7bbf88d/tokenizer/* ../gatech/instruct-pix2pix/tokenizer")    
 
 
 ##################################################################################################################################################################################
@@ -118,15 +138,52 @@ os.system("cp ~/.cache/huggingface/hub/models--timbrooks--instruct-pix2pix/snaps
 ##################################################################################################################################################################################
 
 
+
+# %%
+
+
+outdir = '../flax_models/instruct-pix2pix'
+
+
+def get_params_to_save(params):
+    return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
+
+flax_tokenizer = CLIPTokenizer.from_pretrained('../gatech/instruct-pix2pix/tokenizer' )
+
+# scheduler, _ = FlaxPNDMScheduler.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="scheduler")
+safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
+    "CompVis/stable-diffusion-safety-checker", from_pt=True
+)
+pipeline = FlaxStableDiffusionInstructPix2PixPipeline(
+    text_encoder=flax_text_encoder,
+    vae=flax_vae,
+    unet=flax_unet,
+    tokenizer=flax_tokenizer,
+    scheduler=flax_scheduler,
+    safety_checker=safety_checker,
+    feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
+)
+
+pipeline.save_pretrained(
+    outdir,
+    params={
+        "text_encoder": get_params_to_save(text_encoder.params),
+        "vae": get_params_to_save(vae_params),
+        "unet": get_params_to_save(unet_params),
+        "safety_checker": safety_checker.params,
+    },
+)
+
+
 # %%
 # Load the pretrained Flax models from disk
 
-unet, unet_params = FlaxUNet2DConditionModel.from_pretrained('../flax_models/unet' )
-vae, vae_params = FlaxAutoencoderKL.from_pretrained('../flax_models/vae' )  
-scheduler, schduler_params = FlaxDDPMScheduler.from_pretrained('../flax_models/scheduler' )
-text_encoder = FlaxCLIPTextModel.from_pretrained('../flax_models/text_encoder' )
-text_encoder_params = text_encoder.params
-tokenizer = CLIPTokenizer.from_pretrained('../flax_models/tokenizer' )
+flax_unet, flax_unet_params = FlaxUNet2DConditionModel.from_pretrained('../gatech/instruct-pix2pix/unet' )
+flax_vae,  flax_vae_params = FlaxAutoencoderKL.from_pretrained('../gatech/instruct-pix2pix/vae' )  
+flax_scheduler, flax_schduler_params = FlaxDDPMScheduler.from_pretrained('../gatech/instruct-pix2pix/scheduler' )
+flax_text_encoder = FlaxCLIPTextModel.from_pretrained('../gatech/instruct-pix2pix/text_encoder' )
+flax_text_encoder_params = flax_text_encoder.params
+flax_tokenizer = CLIPTokenizer.from_pretrained('../gatech/instruct-pix2pix/tokenizer' )
 
 
 
@@ -139,56 +196,8 @@ from preprocess_load_data_april4 import train_dataloader, plot_batch
 assert train_dataloader is not None, "Error: Dataset dataloader not loaded correctly"
 
 for i in range(2):
-  plot_batch(train_dataloader, tokenizer)
+    plot_batch(train_dataloader, tokenizer)
 
-
-
-# %%
-# Inference 
-
-from transformers import FlaxCLIPTextModel, CLIPTokenizer, CLIPImageProcessor
-from diffusers import  FlaxPNDMScheduler,  FlaxStableDiffusionPipeline
-from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecker
-from diffusers import FlaxStableDiffusionInstructPix2PixPipeline
-
-def get_params_to_save(params):
-    return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
-
-
-# Create the pipeline using using the trained modules and save it.
-if jax.process_index() == 0:
-    scheduler = FlaxPNDMScheduler(
-        beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", skip_prk_steps=True
-    )
-    safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
-        "CompVis/stable-diffusion-safety-checker", from_pt=True
-    )
-    pipeline = FlaxStableDiffusionInstructPix2PixPipeline(
-        text_encoder=text_encoder,
-        vae=vae,
-        unet=unet,
-        tokenizer=tokenizer,
-        scheduler=scheduler,
-        safety_checker=safety_checker,
-        feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
-    )
-
-    pipeline.save_pretrained(
-       'gatech/instruct-pix2pix', 
-        params={
-            "text_encoder": get_params_to_save(text_encoder_params),
-            "vae": get_params_to_save(vae_params),
-            "unet": get_params_to_save(unet_params),
-            "safety_checker": safety_checker.params,
-        },
-    )
-# %%
-safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
-    "CompVis/stable-diffusion-safety-checker",
-    from_pt=True
-    )
-safety_checker_params = safety_checker.params
-safety_checker.save_pretrained(params=safety_checker_params, save_directory='gatech/instruct-pix2pix/safety_checker' )
 
 
 # %%
@@ -196,8 +205,7 @@ from diffusers import FlaxStableDiffusionInstructPix2PixPipeline
 dtype = jnp.bfloat16
 pipeline, params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
     'gatech/instruct-pix2pix',
-    )    
-
+)    
 
 
 # %%

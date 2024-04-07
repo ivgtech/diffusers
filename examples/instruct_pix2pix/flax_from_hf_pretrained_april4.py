@@ -88,7 +88,7 @@ def get_pretrained(pretrained_model_name_or_path: str, subfolder: str, cls: Any)
         local_files_only=False,
         token=None,
         user_agent=None,
-        subfolder='unet',
+        subfolder=subfolder,
         revision=None,
     )
 
