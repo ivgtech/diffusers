@@ -371,10 +371,18 @@ def prepare_inputs(prompt: Union[str, List[str]], image: Union[Image.Image,  Lis
         return_tensors="np",
     )
 
-
     return text_input.input_ids, processed_images, neg_text_input.input_ids
 
-
+def numpy_to_pil(images):
+    #  from src/diffusers/pipelines/pipeline_flax_utils.py
+    if images.ndim == 3: images = images[None, ...]
+    images = (images * 255).round().astype("uint8")
+    if images.shape[-1] == 1:
+        # special case for grayscale (single channel) images
+        pil_images = [Image.fromarray(image.squeeze(), mode="L") for image in images]
+    else:
+        pil_images = [Image.fromarray(image) for image in images]
+    return pil_images
 
 def create_key(seed=0):
     return jax.random.PRNGKey(seed)
@@ -522,7 +530,6 @@ def my_generate(
 
     latent_timestep = scheduler_state.timesteps[start_timestep : start_timestep + 1].repeat(batch_size)
     latents = scheduler.add_noise(params["scheduler"], init_latents, noise, latent_timestep)
-
     # scale the initial noise by the standard deviation required by the scheduler
     latents = latents * params["scheduler"].init_noise_sigma
     if DEBUG:
@@ -676,6 +683,8 @@ def aot_compile(
 # Compile
 p_generate = aot_compile()
 
+
+
 def generate(prompt, image, negative_prompt, seed=0, guidance_scale=7.5):
     prompt_ids, image_ids, neg_prompt_ids = prepare_inputs(prompt, image, negative_prompt, tokenizer=pipeline.tokenizer)
     prompt_ids, image_ids, neg_prompt_ids, rng = replicate_all(prompt_ids, image_ids, neg_prompt_ids, seed)
@@ -685,7 +694,7 @@ def generate(prompt, image, negative_prompt, seed=0, guidance_scale=7.5):
 
     # convert the images to PIL
     images = images.reshape((images.shape[0] * images.shape[1],) + images.shape[-3:])
-    return pipeline.numpy_to_pil(np.array(images))
+    return numpy_to_pil(np.array(images))
 
 # %% 
 start = time.time()
