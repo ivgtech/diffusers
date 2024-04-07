@@ -69,6 +69,7 @@ from diffusers import (
     FlaxDiffusionPipeline,
   )
 
+from diffusers.utils import make_image_grid
 from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecker
 from diffusers.models.modeling_flax_pytorch_utils import convert_pytorch_state_dict_to_flax
 from diffusers.models.modeling_utils import load_state_dict
@@ -445,11 +446,7 @@ def my_generate(
     noise: Optional[jnp.ndarray] = None,
     neg_prompt_ids: Optional[jnp.ndarray] = None,
 ):
-
-
     vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
-
-
     if height % 8 != 0 or width % 8 != 0:
         raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
@@ -491,7 +488,6 @@ def my_generate(
     init_latents = vae.config.scaling_factor * init_latents
 
     def loop_body(step, args):
-
         latents, scheduler_state = args
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
@@ -510,6 +506,7 @@ def my_generate(
             jnp.array(timestep, dtype=jnp.int32),
             encoder_hidden_states=context,
         ).sample
+
         # perform guidance
         noise_pred_uncond, noise_prediction_text = jnp.split(noise_pred, 2, axis=0)
         noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
@@ -525,6 +522,7 @@ def my_generate(
 
     latent_timestep = scheduler_state.timesteps[start_timestep : start_timestep + 1].repeat(batch_size)
     latents = scheduler.add_noise(params["scheduler"], init_latents, noise, latent_timestep)
+
     # scale the initial noise by the standard deviation required by the scheduler
     latents = latents * params["scheduler"].init_noise_sigma
     if DEBUG:
@@ -656,7 +654,8 @@ def aot_compile(
     #in_axes=(0, 0, 0, 0, None, None, None, None, 0, 0, 0), 
     # static_broadcasted_argnums=(5, 6, 7, 8),
     return (
-        pmap(pipeline._generate, static_broadcasted_argnums=[4,5, 6, 7]) # (5, 6, 7, 8) are the static args
+        # pmap(pipeline._generate, static_broadcasted_argnums=[4,5, 6, 7]) # (5, 6, 7, 8) are the static args
+        pmap(my_generate, static_broadcasted_argnums=[4,5, 6, 7]) # (5, 6, 7, 8) are the static args
         .lower(
                 prompt_ids,
                 image_ids,
@@ -689,7 +688,21 @@ def generate(prompt, image, negative_prompt, seed=0, guidance_scale=7.5):
     return pipeline.numpy_to_pil(np.array(images))
 
 # %% 
+start = time.time()
 images = generate(prompts, init_img, neg_prompts)
 images[0].show()
+print(f"Inference in {time.time() - start}")
+
+# %%
+start = time.time()
+images = generate(prompts, init_img, neg_prompts)
+images[2].show()
+print(f"Inference in {time.time() - start}")
+# 2.700s 
+
+# %%
+# Plot all images
+
+make_image_grid(images, rows=len(images)//4, cols=4)
 
 # %%

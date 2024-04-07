@@ -63,6 +63,7 @@ from diffusers import (
     FlaxStableDiffusionInstructPix2PixPipeline,
   )
 
+from diffusers.utils import make_image_grid
 from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecker
 from diffusers.models.modeling_flax_pytorch_utils import convert_pytorch_state_dict_to_flax
 from diffusers.models.modeling_utils import load_state_dict
