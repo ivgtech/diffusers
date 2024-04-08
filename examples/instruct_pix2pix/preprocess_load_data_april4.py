@@ -117,8 +117,7 @@ def download_image(url):
 ##################################################################################################################################################################################
 
 #tokenizer = CLIPTokenizer.from_pretrained("timbrooks/instruct-pix2pix", subfolder='tokenizer', dtype=jnp.bfloat16)
-tokenizer = CLIPTokenizer.from_pretrained('../flax_models/tokenizer' )
-
+tokenizer = CLIPTokenizer.from_pretrained('../flax_models/instruct-pix2pix/tokenizer/')
 
 
 # Get the datasets: you can either provide your own training and evaluation files (see below)

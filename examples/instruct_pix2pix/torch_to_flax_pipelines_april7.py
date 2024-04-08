@@ -51,12 +51,15 @@ from transformers import (
     FlaxCLIPTextModel
     )
 from diffusers import (
+    UNet2DConditionModel,
     FlaxAutoencoderKL,
     FlaxDDPMScheduler,
     FlaxDDIMScheduler,
     FlaxDPMSolverMultistepScheduler,
     FlaxLMSDiscreteScheduler,
     FlaxPNDMScheduler,
+    FlaxEulerDiscreteScheduler,
+    EulerAncestralDiscreteScheduler,
     FlaxStableDiffusionPipeline,
     FlaxUNet2DConditionModel,
     FlaxStableDiffusionImg2ImgPipeline,
@@ -187,7 +190,8 @@ pipeline.save_pretrained(
 
 
 # %% 
-
+#                                       Convert and Download Instruct-Pix2Pix Pipeline
+######################################################################################
 
 
 # Load models and create wrapper for stable diffusion
@@ -208,10 +212,6 @@ vae, vae_state = FlaxAutoencoderKL.from_pretrained(
     subfolder="vae",
 )
 
-# %% 
-import torch
-from diffusers import EulerAncestralDiscreteScheduler, FlaxEulerDiscreteScheduler
-
 scheduler, scheduler_state = FlaxEulerDiscreteScheduler.from_pretrained(
     'timbrooks/instruct-pix2pix',
     from_pt=True,
@@ -219,7 +219,6 @@ scheduler, scheduler_state = FlaxEulerDiscreteScheduler.from_pretrained(
     subfolder='scheduler',
 )
 
-from diffusers import UNet2DConditionModel
 unet, unet_state = FlaxUNet2DConditionModel.from_pretrained(
     'timbrooks/instruct-pix2pix',
     from_pt=True,
@@ -227,7 +226,6 @@ unet, unet_state = FlaxUNet2DConditionModel.from_pretrained(
     subfolder='unet',
 )
 
-# %%
 safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
     "CompVis/stable-diffusion-safety-checker", from_pt=True
 )
@@ -246,10 +244,8 @@ pipeline = FlaxStableDiffusionPipeline(
 
 text_encoder_state = text_encoder._params
 
-outdir = '../flax_models/instruct-pix2pix'
-
 pipeline.save_pretrained(
-    outdir,
+    '../flax_models/instruct-pix2pix',
     params={
         "text_encoder": text_encoder_state,  # FlaxPreTrainedModel.save_pretrained
         "vae": vae_state,

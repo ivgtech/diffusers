@@ -130,7 +130,7 @@ text_encoder.save_pretrained(save_directory='../gatech/instruct-pix2pix/text_enc
 
 # Either save the tokenizer files (without -r to avoid sym linking issues) or reload from the huggingface hub each time
 os.makedirs("../gatech/instruct-pix2pix/tokenizer", exist_ok=True)
-os.system("cp ~/.cache/huggingface/hub/models--timbrooks--instruct-pix2pix/snapshots/31519b5cb02a7fd89b906d88731cd4d6a7bbf88d/tokenizer/* ../gatech/instruct-pix2pix/tokenizer")    
+#os.system("cp ~/.cache/huggingface/hub/models--timbrooks--instruct-pix2pix/snapshots/31519b5cb02a7fd89b906d88731cd4d6a7bbf88d/tokenizer/* ../gatech/instruct-pix2pix/tokenizer")    
 
 
 ##################################################################################################################################################################################
