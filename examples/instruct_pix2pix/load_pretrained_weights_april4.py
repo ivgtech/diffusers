@@ -1,6 +1,7 @@
 # %%
 
 import os
+from pyexpat import model
 import sys
 import time
 import requests
@@ -56,6 +57,7 @@ from diffusers import (
     FlaxDPMSolverMultistepScheduler,
     FlaxLMSDiscreteScheduler,
     FlaxPNDMScheduler,
+    FlaxDiffusionPipeline,
     FlaxStableDiffusionPipeline,
     FlaxUNet2DConditionModel,
     FlaxStableDiffusionImg2ImgPipeline,
@@ -107,30 +109,95 @@ def download_pretrained_weights(model_url: str, download_dir: str, model_name: s
 
 # %%
 # Convert the instruct-pix2pix pretrained models from Pytorch to Flax
+model_id= "timbrooks/instruct-pix2pix"
+model_id = "runwayml/stable-diffusion-v1-5"
 
-scheduler, schduler_params = FlaxDDPMScheduler.from_pretrained("timbrooks/instruct-pix2pix", subfolder="scheduler")
-text_encoder = FlaxCLIPTextModel.from_pretrained("timbrooks/instruct-pix2pix", subfolder='text_encoder', dtype=jnp.bfloat16)
-tokenizer = CLIPTokenizer.from_pretrained("timbrooks/instruct-pix2pix", subfolder='tokenizer', dtype=jnp.bfloat16)
-vae, vae_params = get_pretrained("timbrooks/instruct-pix2pix", 'vae', FlaxAutoencoderKL)
-unet, unet_params = get_pretrained("timbrooks/instruct-pix2pix", 'unet', FlaxUNet2DConditionModel)
+# clear huggingface cache if needed
+
+# Download 
+scheduler, schduler_params = FlaxDDPMScheduler.from_pretrained(model_id, subfolder="scheduler")
+text_encoder = FlaxCLIPTextModel.from_pretrained(model_id, subfolder='text_encoder', dtype=jnp.bfloat16)
+tokenizer = CLIPTokenizer.from_pretrained(model_id, subfolder='tokenizer', dtype=jnp.bfloat16)
+vae, vae_params = get_pretrained(model_id, 'vae', FlaxAutoencoderKL)
+unet, unet_params = get_pretrained(model_id, 'unet', FlaxUNet2DConditionModel)
 
 
  # %%
 # Save the Flax unet, vae, text_encoder and scheduler models and their configuration files to a directory 
 # so that they can be reloaded using the [`~FlaxModelMixin.from_pretrained`] class method.
 
-
 unet_params = freeze(unet_params)
 vae_params = freeze(vae_params)
+save_directory = '../flax_models/instruct-pix2pix'
+save_directory = '../flax_models/stable-diffusion-v1-5'
 
-unet.save_pretrained(params=unet_params,save_directory='../gatech/instruct-pix2pix/unet' )
-vae.save_pretrained(params=vae_params,save_directory='../gatech/instruct-pix2pix/vae' )
-scheduler.save_pretrained(params=schduler_params,save_directory='../gatech/instruct-pix2pix/scheduler' )
-text_encoder.save_pretrained(save_directory='../gatech/instruct-pix2pix/text_encoder' )
+unet.save_pretrained(params=unet_params,save_directory=save_directory)
+vae.save_pretrained(params=vae_params,save_directory=save_directory )
+scheduler.save_pretrained(params=schduler_params,save_directory=save_directory )
+text_encoder.save_pretrained(save_directory=save_directory )
 
 # Either save the tokenizer files (without -r to avoid sym linking issues) or reload from the huggingface hub each time
-os.makedirs("../gatech/instruct-pix2pix/tokenizer", exist_ok=True)
-#os.system("cp ~/.cache/huggingface/hub/models--timbrooks--instruct-pix2pix/snapshots/31519b5cb02a7fd89b906d88731cd4d6a7bbf88d/tokenizer/* ../gatech/instruct-pix2pix/tokenizer")    
+os.makedirs(f"{save_directory}/tokenizer", exist_ok=True)
+
+os.system(f"cp ~/.cache/huggingface/hub/models--runwayml--stable-diffusion-v1-5/snapshots/1d0c4ebf6ff58a5caecab40fa1406526bca4b5b9/tokenizer/* {save_directory}/tokenizer")   
+#os.system(f"cp ~/.cache/huggingface/hub/models--timbrooks--instruct-pix2pix/snapshots/31519b5cb02a7fd89b906d88731cd4d6a7bbf88d/tokenizer/* {save_directory}/tokenizer")   
+
+
+
+
+ # %%
+ #                     Simplified torch to flax conversion using diffusers pipeline 
+ ################################################################################
+
+
+# clear huggingface cache if needed
+pipeline, params = FlaxDiffusionPipeline.from_pretrained(
+    'runwayml/stable-diffusion-v1-5',
+    revision="flax",
+)
+
+outdir = '../flax_models/stable-diffusion-v1-5'
+
+pipeline = FlaxStableDiffusionInstructPix2PixPipeline(
+    text_encoder=pipeline.text_encoder,
+    vae=pipeline.vae,
+    unet=pipeline.unet,
+    tokenizer=pipeline.tokenizer,
+    scheduler=pipeline.scheduler,
+    safety_checker=pipeline.safety_checker,
+    feature_extractor=pipeline.feature_extractor,
+)
+
+pipeline.save_pretrained(
+    outdir,
+    params={
+        "text_encoder": params['text_encoder'],
+        "vae": params['vae'],
+        "unet": params['unet'],
+        "safety_checker": params['safety_checker'],
+    },
+)
+
+# %%
+# test the new pipeline
+outdir = '../flax_models/stable-diffusion-v1-5'
+
+flax_unet, flax_unet_params = FlaxUNet2DConditionModel.from_pretrained(outdir + '/unet' )
+flax_vae,  flax_vae_params = FlaxAutoencoderKL.from_pretrained(outdir + '/vae' )  
+flax_scheduler, flax_schduler_params = FlaxDDPMScheduler.from_pretrained(outdir + '/scheduler' )
+flax_text_encoder = FlaxCLIPTextModel.from_pretrained(outdir + '/text_encoder' )
+flax_text_encoder_params = flax_text_encoder.params
+flax_tokenizer = CLIPTokenizer.from_pretrained(outdir + '/tokenizer' )
+
+# Load data loader : https://huggingface.co/datasets/fusing/instructpix2pix-1000-samples
+# dict_keys(['input_image', 'edit_prompt', 'edited_image', 'original_pixel_values', 'edited_pixel_values', 'input_ids'])
+
+from preprocess_load_data_april4 import train_dataloader, plot_batch
+assert train_dataloader is not None, "Error: Dataset dataloader not loaded correctly"
+
+for i in range(2):
+    plot_batch(train_dataloader, flax_tokenizer)
+
 
 
 ##################################################################################################################################################################################
@@ -191,7 +258,6 @@ flax_tokenizer = CLIPTokenizer.from_pretrained('../gatech/instruct-pix2pix/token
 # Load the dataset and data loader : https://huggingface.co/datasets/fusing/instructpix2pix-1000-samples
 # dict_keys(['input_image', 'edit_prompt', 'edited_image', 'original_pixel_values', 'edited_pixel_values', 'input_ids'])
 
-# local import
 from preprocess_load_data_april4 import train_dataloader, plot_batch
 assert train_dataloader is not None, "Error: Dataset dataloader not loaded correctly"
 

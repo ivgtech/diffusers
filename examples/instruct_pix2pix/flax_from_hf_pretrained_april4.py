@@ -53,7 +53,7 @@ from diffusers.models.modeling_utils import load_state_dict
 
  
  
-def get_pretrained(pretrained_model_name_or_path: str, subfolder: str, cls: Any) -> Dict:
+def get_pretrained(pretrained_model_name_or_path: str, subfolder: str, cls: Any, force_download: bool = False) -> Dict:
 
     def create_flax_config(pretrained_model_name_or_path: str, subfolder: str, cls: Any) -> Dict:
         config, unused_kwargs = cls.load_config(

@@ -101,13 +101,21 @@ NUM_DEVICES = jax.device_count()
 
 dtype = jnp.bfloat16
 pipeline, params = FlaxDiffusionPipeline.from_pretrained(
-    '../flax_models/instruct-pix2pix',
+    #'../flax_models/instruct-pix2pix',
+    '../flax_models/stable-diffusion-v1-5',
     revision="flax",
     dtype=dtype,
 )
 
 
-
+vae = pipeline.vae
+text_encoder = pipeline.text_encoder
+tokenizer = pipeline.tokenizer
+unet = pipeline.unet
+scheduler = pipeline.scheduler
+safety_checker = pipeline.safety_checker
+feature_extractor = pipeline.feature_extractor
+dtype = pipeline.dtype
 
 # %%
 
@@ -174,67 +182,9 @@ def download_image(url):
     return image
 
     
-# %% 
-
-#####################################################################################
-# train_controlnet_sdxl.py
-
-# Adapted from pipelines.StableDiffusionXLPipeline.encode_prompt
-def encode_prompt(prompt_batch, text_encoders, tokenizers, proportion_empty_prompts, rng, is_train=True):
-    prompt_embeds_list = []
-
-    captions = []
-    for caption in prompt_batch:
-
-        #if jax.random.uniform(rng) < proportion_empty_prompts:
-        if random.random() < proportion_empty_prompts:
-            captions.append("")
-        elif isinstance(caption, str):
-            captions.append(caption)
-        elif isinstance(caption, (list, np.ndarray)):
-            # take a random caption if there are multiple
-            captions.append(random.choice(caption) if is_train else caption[0])
-
-    for tokenizer, text_encoder in zip(tokenizers, text_encoders):
-        text_inputs = tokenizer(
-            captions,
-            padding="max_length",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        text_input_ids = text_inputs.input_ids
-        prompt_embeds = text_encoder(
-            text_input_ids.to(text_encoder.device),
-            output_hidden_states=True,
-        )
-
-        # We are only ALWAYS interested in the pooled output of the final text encoder
-        pooled_prompt_embeds = prompt_embeds[0]
-        prompt_embeds = prompt_embeds.hidden_states[-2]
-        bs_embed, seq_len, _ = prompt_embeds.shape
-        prompt_embeds = prompt_embeds.view(bs_embed, seq_len, -1)
-        prompt_embeds_list.append(prompt_embeds)
-
-    prompt_embeds = torch.concat(prompt_embeds_list, dim=-1)
-    pooled_prompt_embeds = pooled_prompt_embeds.view(bs_embed, -1)
-    return prompt_embeds, pooled_prompt_embeds
 
 # %%
 
-
-
-
-import flax
-import flax.linen as nn
-import jax
-import jax.numpy as jnp
-from transformers import FlaxCLIPTextModel, CLIPTokenizer
-
-import jax
-import jax.numpy as jnp
-from typing import List, Optional
-from transformers import CLIPTokenizer, FlaxCLIPTextModel
 
 def encode_prompt(
     prompt_batch: List[str],
@@ -269,8 +219,8 @@ def encode_prompt(
             return_tensors="jax"
         )
         text_input_ids = text_inputs.input_ids
-
-        outputs = text_encoder(text_input_ids)
+        # pass the text_encoder params to the text_encoder explicitly
+        outputs = text_encoder(text_input_ids, params=params["text_encoder"])
         prompt_embeds = outputs.last_hidden_state
 
         # handling pooled outputs is model-specific, here we assume last_hidden_state for simplicity
@@ -312,321 +262,66 @@ print(pooled_prompt_embeds.shape)
 # %%
 
 
-#####################################################################################
-# pipeline_stable_diffusion_instruct_pix2pix.py
 
-def _encode_prompt(
-    prompt,
-    device,
-    num_images_per_prompt,
-    do_classifier_free_guidance,
-    negative_prompt=None,
-    prompt_embeds: Optional[torch.FloatTensor] = None,
-    negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+# %% 
+# Image and prompt inputs
+
+
+
+url = "https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/stable-samples/img2img/sketch-mountains-input.jpg"
+response = requests.get(url)
+init_img = Image.open(BytesIO(response.content)).convert("RGB")
+init_img = init_img.resize((768, 512))
+prompts = "A fantasy landscape, trending on artstation"
+neg_prompts = "not a fantasy landscape, trending on artstation" 
+
+
+url = "https://huggingface.co/datasets/sayakpaul/sample-datasets/resolve/main/test_pix2pix_4.png"
+response = requests.get(url)
+init_img = Image.open(BytesIO(response.content)).convert("RGB")
+init_img = init_img.resize((768, 512))
+prompts = "wipe out the lake"
+neg_prompts = ""
+num_inference_steps = 20
+image_guidance_scale = 1.5
+guidance_scale = 10
+
+# edited_image = pipe(prompt, 
+#     image=image, 
+#     num_inference_steps=num_inference_steps, 
+#     image_guidance_scale=image_guidance_scale, 
+#     guidance_scale=guidance_scale,
+#     generator=generator,
+# ).images[0]
+
+# edited_image.save("edited_image.png")
+# %%
+
+# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
+def retrieve_latents(
+    encoder_output: jnp.ndarray, generator: Optional[jax.random.PRNGKey] = None, sample_mode: str = "sample"
 ):
-    if prompt is not None and isinstance(prompt, str):
-        batch_size = 1
-    elif prompt is not None and isinstance(prompt, list):
-        batch_size = len(prompt)
+    if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
+        # return encoder_output.latent_dist.sample(generator)
+        return jax.random.categorical(generator, encoder_output.latent_dist.logits).astype(jnp.float32)
+    elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
+        return encoder_output.latent_dist.mode()
+    elif hasattr(encoder_output, "latents"):
+        return encoder_output.latents
     else:
-        batch_size = prompt_embeds.shape[0]
+        raise AttributeError("Could not access latents of provided encoder_output")
 
-    if prompt_embeds is None:
-        # textual inversion: process multi-vector tokens if necessary
-        if isinstance( TextualInversionLoaderMixin):
-            prompt = maybe_convert_prompt(prompt, tokenizer)
-
-        text_inputs = tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        text_input_ids = text_inputs.input_ids
-        untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
-
-        if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
-            text_input_ids, untruncated_ids
-        ):
-            removed_text = tokenizer.batch_decode(
-                untruncated_ids[:, tokenizer.model_max_length - 1 : -1]
-            )
-            logger.warning(
-                "The following part of your input was truncated because CLIP can only handle sequences up to"
-                f" {tokenizer.model_max_length} tokens: {removed_text}"
-            )
-
-        if hasattr(text_encoder.config, "use_attention_mask") and text_encoder.config.use_attention_mask:
-            attention_mask = text_inputs.attention_mask.to(device)
-        else:
-            attention_mask = None
-
-        prompt_embeds = text_encoder(text_input_ids.to(device), attention_mask=attention_mask)
-        prompt_embeds = prompt_embeds[0]
-
-    if text_encoder is not None:
-        prompt_embeds_dtype = text_encoder.dtype
-    else:
-        prompt_embeds_dtype = unet.dtype
-
-    prompt_embeds = prompt_embeds.to(dtype=prompt_embeds_dtype, device=device)
-
-    bs_embed, seq_len, _ = prompt_embeds.shape
-    # duplicate text embeddings for each generation per prompt, using mps friendly method
-    prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-    prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
-
-    # get unconditional embeddings for classifier free guidance
-    if do_classifier_free_guidance and negative_prompt_embeds is None:
-        uncond_tokens: List[str]
-        if negative_prompt is None:
-            uncond_tokens = [""] * batch_size
-        elif type(prompt) is not type(negative_prompt):
-            raise TypeError(
-                f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                f" {type(prompt)}."
-            )
-        elif isinstance(negative_prompt, str):
-            uncond_tokens = [negative_prompt]
-        elif batch_size != len(negative_prompt):
-            raise ValueError(
-                f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
-                f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
-                " the batch size of `prompt`."
-            )
-        else:
-            uncond_tokens = negative_prompt
-
-        # textual inversion: process multi-vector tokens if necessary
-        if isinstance( TextualInversionLoaderMixin):
-            uncond_tokens = maybe_convert_prompt(uncond_tokens, tokenizer)
-
-        max_length = prompt_embeds.shape[1]
-        uncond_input = tokenizer(
-            uncond_tokens,
-            padding="max_length",
-            max_length=max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-
-        if hasattr(text_encoder.config, "use_attention_mask") and text_encoder.config.use_attention_mask:
-            attention_mask = uncond_input.attention_mask.to(device)
-        else:
-            attention_mask = None
-
-        negative_prompt_embeds = text_encoder(
-            uncond_input.input_ids.to(device),
-            attention_mask=attention_mask,
-        )
-        negative_prompt_embeds = negative_prompt_embeds[0]
-
-    if do_classifier_free_guidance:
-        # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
-        seq_len = negative_prompt_embeds.shape[1]
-
-        negative_prompt_embeds = negative_prompt_embeds.to(dtype=prompt_embeds_dtype, device=device)
-
-        negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
-
-        # For classifier free guidance, we need to do two forward passes.
-        # Here we concatenate the unconditional and text embeddings into a single batch
-        # to avoid doing two forward passes
-        # pix2pix has two negative embeddings, and unlike in other pipelines latents are ordered [prompt_embeds, negative_prompt_embeds, negative_prompt_embeds]
-        prompt_embeds = torch.cat([prompt_embeds, negative_prompt_embeds, negative_prompt_embeds])
-
-    return prompt_embeds
-
-
-
-
-
-#####################################################################################
-# /home/v/diffusers/examples/community/llm_grounded_diffusion.py
-
-
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._encode_prompt
-def _encode_prompt(
-    prompt,
-    device,
-    num_images_per_prompt,
-    do_classifier_free_guidance,
-    negative_prompt=None,
-    prompt_embeds: Optional[torch.FloatTensor] = None,
-    negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-    lora_scale: Optional[float] = None,
-    **kwargs,
-):
-    deprecation_message = "`_encode_prompt()` is deprecated and it will be removed in a future version. Use `encode_prompt()` instead. Also, be aware that the output format changed from a concatenated tensor to a tuple."
-    deprecate("_encode_prompt()", "1.0.0", deprecation_message, standard_warn=False)
-
-    prompt_embeds_tuple = encode_prompt(
-        prompt=prompt,
-        device=device,
-        num_images_per_prompt=num_images_per_prompt,
-        do_classifier_free_guidance=do_classifier_free_guidance,
-        negative_prompt=negative_prompt,
-        prompt_embeds=prompt_embeds,
-        negative_prompt_embeds=negative_prompt_embeds,
-        lora_scale=lora_scale,
-        **kwargs,
-    )
-
-    # concatenate for backwards comp
-    prompt_embeds = torch.cat([prompt_embeds_tuple[1], prompt_embeds_tuple[0]])
-
-    return prompt_embeds
-
-
-
-
-
-
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_image
-def encode_image( image, device, num_images_per_prompt, output_hidden_states=None):
-    dtype = next(image_encoder.parameters()).dtype
-
-    if not isinstance(image, torch.Tensor):
-        image = feature_extractor(image, return_tensors="pt").pixel_values
-
-    image = image.to(device=device, dtype=dtype)
-    if output_hidden_states:
-        image_enc_hidden_states = image_encoder(image, output_hidden_states=True).hidden_states[-2]
-        image_enc_hidden_states = image_enc_hidden_states.repeat_interleave(num_images_per_prompt, dim=0)
-        uncond_image_enc_hidden_states = image_encoder(
-            torch.zeros_like(image), output_hidden_states=True
-        ).hidden_states[-2]
-        uncond_image_enc_hidden_states = uncond_image_enc_hidden_states.repeat_interleave(
-            num_images_per_prompt, dim=0
-        )
-        return image_enc_hidden_states, uncond_image_enc_hidden_states
-    else:
-        image_embeds = image_encoder(image).image_embeds
-        image_embeds = image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
-        uncond_image_embeds = torch.zeros_like(image_embeds)
-
-        return image_embeds, uncond_image_embeds
-
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.run_safety_checker
-def run_safety_checker( image, device, dtype):
-    if safety_checker is None:
-        has_nsfw_concept = None
-    else:
-        if torch.is_tensor(image):
-            feature_extractor_input = image_processor.postprocess(image, output_type="pil")
-        else:
-            feature_extractor_input = image_processor.numpy_to_pil(image)
-        safety_checker_input = feature_extractor(feature_extractor_input, return_tensors="pt").to(device)
-        image, has_nsfw_concept = safety_checker(
-            images=image, clip_input=safety_checker_input.pixel_values.to(dtype)
-        )
-    return image, has_nsfw_concept
-
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
-def prepare_extra_step_kwargs( generator, eta):
-    # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
-    # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-    # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
-    # and should be between [0, 1]
-
-    accepts_eta = "eta" in set(inspect.signature(scheduler.step).parameters.keys())
-    extra_step_kwargs = {}
-    if accepts_eta:
-        extra_step_kwargs["eta"] = eta
-
-    # check if the scheduler accepts generator
-    accepts_generator = "generator" in set(inspect.signature(scheduler.step).parameters.keys())
-    if accepts_generator:
-        extra_step_kwargs["generator"] = generator
-    return extra_step_kwargs
-
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.decode_latents
-def decode_latents( latents):
-    deprecation_message = "The decode_latents method is deprecated and will be removed in 1.0.0. Please use VaeImageProcessor.postprocess(...) instead"
-    deprecate("decode_latents", "1.0.0", deprecation_message, standard_warn=False)
-
-    latents = 1 / vae.config.scaling_factor * latents
-    image = vae.decode(latents, return_dict=False)[0]
-    image = (image / 2 + 0.5).clamp(0, 1)
-    # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
-    image = image.cpu().permute(0, 2, 3, 1).float().numpy()
-    return image
-
-def check_inputs(
-    prompt,
-    callback_steps,
-    negative_prompt=None,
-    prompt_embeds=None,
-    negative_prompt_embeds=None,
-    callback_on_step_end_tensor_inputs=None,
-):
-    if callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0):
-        raise ValueError(
-            f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
-            f" {type(callback_steps)}."
-        )
-
-    if callback_on_step_end_tensor_inputs is not None and not all(
-        k in _callback_tensor_inputs for k in callback_on_step_end_tensor_inputs
-    ):
-        raise ValueError(
-            f"`callback_on_step_end_tensor_inputs` has to be in {_callback_tensor_inputs}, but found {[k for k in callback_on_step_end_tensor_inputs if k not in _callback_tensor_inputs]}"
-        )
-
-    if prompt is not None and prompt_embeds is not None:
-        raise ValueError(
-            f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
-            " only forward one of the two."
-        )
-    elif prompt is None and prompt_embeds is None:
-        raise ValueError(
-            "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
-        )
-    elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
-        raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
-
-    if negative_prompt is not None and negative_prompt_embeds is not None:
-        raise ValueError(
-            f"Cannot forward both `negative_prompt`: {negative_prompt} and `negative_prompt_embeds`:"
-            f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
-        )
-
-    if prompt_embeds is not None and negative_prompt_embeds is not None:
-        if prompt_embeds.shape != negative_prompt_embeds.shape:
-            raise ValueError(
-                "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
-                f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
-                f" {negative_prompt_embeds.shape}."
-            )
-
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_latents
-def prepare_latents( batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
-    shape = (batch_size, num_channels_latents, height // vae_scale_factor, width // vae_scale_factor)
-    if isinstance(generator, list) and len(generator) != batch_size:
-        raise ValueError(
-            f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
-            f" size of {batch_size}. Make sure the batch size matches the length of the generators."
-        )
-
-    if latents is None:
-        latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-    else:
-        latents = latents.to(device)
-    # scale the initial noise by the standard deviation required by the scheduler
-    latents = latents * scheduler.init_noise_sigma
-    return latents
-
+# convert helper functions to jax.numpy
 def prepare_image_latents(
-     image, batch_size, num_images_per_prompt, dtype, device, do_classifier_free_guidance, generator=None
-):
-    if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
+     image, batch_size, num_images_per_prompt, dtype, do_classifier_free_guidance ):
+    # convert to jax.numpy
+    if not isinstance(image, (jax.numpy.ndarray, PIL.Image.Image, list)):
         raise ValueError(
             f"`image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image)}"
         )
 
-    image = image.to(device=device, dtype=dtype)
+    image = jnp.array(image).astype(dtype) / 255.0
+    image = image[None].transpose(0, 3, 1, 2)
 
     batch_size = batch_size * num_images_per_prompt
 
@@ -645,75 +340,24 @@ def prepare_image_latents(
         )
         deprecate("len(prompt) != len(image)", "1.0.0", deprecation_message, standard_warn=False)
         additional_image_per_prompt = batch_size // image_latents.shape[0]
-        image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
+        image_latents = jnp.concatenate([image_latents] * additional_image_per_prompt, axis=0)
     elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
         raise ValueError(
             f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
         )
     else:
-        image_latents = torch.cat([image_latents], dim=0)
+        image_latents = jnp.concatenate([image_latents], axis=0)
 
     if do_classifier_free_guidance:
-        uncond_image_latents = torch.zeros_like(image_latents)
-        image_latents = torch.cat([image_latents, image_latents, uncond_image_latents], dim=0)
+        uncond_image_latents = jnp.zeros_like(image_latents)
+        image_latents = jnp.concatenate([image_latents, image_latents, uncond_image_latents], axis=0)
 
     return image_latents
-
-def guidance_scale():
-    return _guidance_scale
-
-def image_guidance_scale():
-    return _image_guidance_scale
-
-def num_timesteps():
-    return _num_timesteps
-
-# here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-# of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
-# corresponds to doing no classifier free guidance.
-def do_classifier_free_guidance():
-    return guidance_scale > 1.0 and image_guidance_scale >= 1.0
-
-
-
-
-
-
-
-
-
-# %% 
-# Image and prompt inputs
-url = "https://huggingface.co/datasets/sayakpaul/sample-datasets/resolve/main/test_pix2pix_4.png"
-
-image = download_image(url)
-prompt = "wipe out the lake"
-num_inference_steps = 20
-image_guidance_scale = 1.5
-guidance_scale = 10
-
-# edited_image = pipe(prompt, 
-#     image=image, 
-#     num_inference_steps=num_inference_steps, 
-#     image_guidance_scale=image_guidance_scale, 
-#     guidance_scale=guidance_scale,
-#     generator=generator,
-# ).images[0]
-
-# edited_image.save("edited_image.png")
-
 
 # %% 
 # Inference function run as part of the AOT compilation
 
-vae = pipeline.vae
-text_encoder = pipeline.text_encoder
-tokenizer = pipeline.tokenizer
-unet = pipeline.unet
-scheduler = pipeline.scheduler
-safety_checker = pipeline.safety_checker
-feature_extractor = pipeline.feature_extractor
-dtype = pipeline.dtype
+
 
 def my_generate(
     prompt_ids: jnp.ndarray,
@@ -738,6 +382,7 @@ def my_generate(
     # TODO: currently it is assumed `do_classifier_free_guidance = guidance_scale > 1.0`
     # implement this conditional `do_classifier_free_guidance = guidance_scale > 1.0`
     batch_size = prompt_ids.shape[0]
+
     max_length = prompt_ids.shape[-1]
 
     if neg_prompt_ids is None:
@@ -746,9 +391,11 @@ def my_generate(
         ).input_ids
     else:
         uncond_input = neg_prompt_ids
-
     negative_prompt_embeds = text_encoder(uncond_input, params=params["text_encoder"])[0]
     context = jnp.concatenate([negative_prompt_embeds, prompt_embeds])
+
+    # Ensure model output will be `float32` before going into the scheduler
+    guidance_scale = jnp.array([guidance_scale], dtype=jnp.float32)
 
     latents_shape = (
         batch_size,
@@ -772,10 +419,18 @@ def my_generate(
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
-        latents_input = jnp.concatenate([latents] * 2)
+
+        # Expand the latents if we are doing classifier free guidance.
+        # The latents are expanded 3 times because for pix2pix the guidance\
+        # is applied for both the text and the input image.
+        latents_input = jnp.concatenate([latents] * 2 ) # 3)
+        
 
         t = jnp.array(scheduler_state.timesteps, dtype=jnp.int32)[step]
         timestep = jnp.broadcast_to(t, latents_input.shape[0])
+
+        # concat latents, init_latents(image_latents) in the channel dimension
+        latents_input = jnp.concatenate([latents, init_latents], axis=1)
 
         latents_input = scheduler.scale_model_input(scheduler_state, latents_input, t)
 
@@ -851,9 +506,19 @@ def aot_compile(
     height=512,
     width=768,
 ):
+
     prompt_ids, image_ids, neg_prompt_ids = prepare_inputs(prompt, image, negative_prompt, tokenizer=pipeline.tokenizer)
     prompt_ids, image_ids, neg_prompt_ids, rng = replicate_all(prompt_ids, image_ids, neg_prompt_ids, seed)
     start_timestep = get_timestep_start(num_inference_steps, strength)
+
+    if isinstance(guidance_scale, float):
+        # Convert to a tensor so each device gets a copy. Follow the prompt_ids for
+        # shape information, as they may be sharded (when `jit` is `True`), or not.
+        guidance_scale = jnp.array([guidance_scale] * prompt_ids.shape[0])
+        if len(prompt_ids.shape) > 2:
+            # Assume sharded
+            guidance_scale = guidance_scale[:, None]
+
     g = jnp.array([guidance_scale] * prompt_ids.shape[0], dtype=jnp.float32)
     g = g[:, None]
     # Static argnums are pipe, start_timestep, num_inference_steps, height, width
