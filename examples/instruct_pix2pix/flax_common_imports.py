@@ -32,6 +32,8 @@ from flax.serialization import from_bytes, to_bytes
 from flax.traverse_util import flatten_dict, unflatten_dict
 
 import torch
+from torch.utils.data import DataLoader
+
 from huggingface_hub import create_repo, hf_hub_download
 from huggingface_hub.utils import (
     EntryNotFoundError,
@@ -59,6 +61,7 @@ from diffusers import (
     FlaxDDPMScheduler,
     FlaxDDIMScheduler,
     FlaxDPMSolverMultistepScheduler,
+    FlaxEulerDiscreteScheduler,
     FlaxLMSDiscreteScheduler,
     FlaxPNDMScheduler,
     FlaxStableDiffusionPipeline,
@@ -66,7 +69,7 @@ from diffusers import (
     FlaxStableDiffusionImg2ImgPipeline,
     FlaxStableDiffusionInstructPix2PixPipeline,
     FlaxDiffusionPipeline,
-  )
+    )
 
 from diffusers.utils import make_image_grid
 from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecker
