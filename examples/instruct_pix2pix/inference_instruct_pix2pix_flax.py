@@ -27,7 +27,7 @@ from diffusers.models.unets import unet_spatio_temporal_condition
 NUM_DEVICES = jax.device_count()
 
 from flax.jax_utils import replicate, unreplicate
-from flax.training.common_utils import shard
+from flax.training.common_utils import shard, onehot
 from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
 from flax.serialization import from_bytes, to_bytes
 from flax.traverse_util import flatten_dict, unflatten_dict
@@ -163,58 +163,6 @@ def download_image(url):
 
     
     
-    
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
-
-import flax.linen as nn
-import jax
-import jax.numpy as jnp
-from flax.training.common_utils import onehot
-
-def retrieve_latents_jax(image, params, key=None, sample_mode="sample"):
-  encoder_output = vae.apply({"params": params["vae"]}, image, method=vae.encode)
-  latent_dist = encoder_output.latent_dist 
-
-  if sample_mode == "sample":
-    return latent_dist.sample(key)
-  elif sample_mode == "argmax":
-    return latent_dist.mean 
-  else:
-    raise ValueError(f"Invalid sample_mode: {sample_mode}")
-
-# convert helper functions to jax.numpy
-def prepare_image_latents(image, params, batch_size, num_images_per_prompt, dtype, do_classifier_free_guidance, key):
-    # Ensure input is in a supported format
-    # if not isinstance(image, (np.ndarray, Image.Image, list)):
-    #     raise ValueError(f"`image` has to be of type `numpy.ndarray`, `PIL.Image.Image` or list but is {type(image)}")
-    if isinstance(image, Image.Image):
-        image = np.array(image)
-    elif isinstance(image, list):
-        image = np.stack(image)  # Assumes images in list are numpy arrays of the same shape
-    
-
-    batch_size_adjusted = batch_size * num_images_per_prompt
-
-    if image.shape[1] == 4:
-      image_latents = image
-    else:
-      image_latents = retrieve_latents_jax(image, params, key, sample_mode="argmax")
-
-    # Handling different batch sizes
-    if batch_size_adjusted > image_latents.shape[0]:
-        factor = batch_size_adjusted // image_latents.shape[0]
-        remainder = batch_size_adjusted % image_latents.shape[0]
-        if remainder != 0:
-            raise ValueError(f"Cannot match `image` batch size {image_latents.shape[0]} to {batch_size_adjusted} prompts.")
-        image_latents = jnp.tile(image_latents, (factor,) + (1,) * (image_latents.ndim - 1))
-
-    if do_classifier_free_guidance:
-        uncond_image_latents = jnp.zeros_like(image_latents)
-        image_latents = jnp.concatenate([image_latents, uncond_image_latents], axis=0)
-
-    return image_latents
-
-
 
 def encode_prompt(
     prompt_batch: List[str],
@@ -347,7 +295,13 @@ def my_generate(
     else:
         uncond_input = neg_prompt_ids
     negative_prompt_embeds = text_encoder(uncond_input, params=params["text_encoder"])[0]
-    context = jnp.concatenate([negative_prompt_embeds, prompt_embeds])
+
+    
+    # For classifier free guidance, we need to do two forward passes.
+    # Here we concatenate the unconditional and text embeddings into a single batch
+    # to avoid doing two forward passes
+    # pix2pix has two negative embeddings, and unlike in other pipelines latents are ordered [prompt_embeds, negative_prompt_embeds, negative_prompt_embeds]
+    context = jnp.concatenate([prompt_embeds, negative_prompt_embeds, negative_prompt_embeds ])
 
     # Ensure model output will be `float32` before going into the scheduler
     guidance_scale = jnp.array([guidance_scale], dtype=jnp.float32)
@@ -375,6 +329,8 @@ def my_generate(
     init_latent_dist = vae.apply({"params": params["vae"]}, image, method=vae.encode).latent_dist
     init_latents = init_latent_dist.sample(key=prng_seed).transpose((0, 3, 1, 2))
     init_latents = vae.config.scaling_factor * init_latents
+    print('image.shape, image_latents.shape', image.shape, image_latents.shape)
+    print('expect: image.shape, image_latents.shape torch.Size([1, 3, 512, 512]) torch.Size([3, 4, 64, 64])')
 
     def loop_body(step, args):
         latents, scheduler_state = args
@@ -404,6 +360,7 @@ def my_generate(
 
         # latents_input = scheduler.scale_model_input(scheduler_state, latents_input, t)
 
+
         # predict the noise residual
         noise_pred = unet.apply(
             {"params": params["unet"]},
@@ -412,13 +369,15 @@ def my_generate(
             encoder_hidden_states=context,
         ).sample
 
+        # print('noise_pred', noise_pred.shape, latents_input.shape, timestep.shape, context.shape)
+
         noise_pred_text, noise_pred_image, noise_pred_uncond = jnp.split(noise_pred, 3, axis=0)
+        print(guidance_scale, IMAGE_GUIDANCE_SCALE)
         noise_pred = (
             noise_pred_uncond
             + guidance_scale * (noise_pred_text - noise_pred_image)
             + IMAGE_GUIDANCE_SCALE * (noise_pred_image - noise_pred_uncond)
         )
-
         # perform guidance
         # noise_pred_uncond, noise_prediction_text = jnp.split(noise_pred, 2, axis=0)
         # noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
@@ -467,6 +426,54 @@ def replicate_all(prompt_ids, image, neg_prompt_ids, seed):
 def get_timestep_start( num_inference_steps, strength): 
     init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
     return max(num_inference_steps - init_timestep, 0)
+
+
+    
+# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
+def retrieve_latents_jax(image, params, key=None, sample_mode="sample"):
+    # pass the image through the VAE to get the latents
+    encoder_output = vae.apply({"params": params["vae"]}, image, method=vae.encode)
+
+    # get the latent distribution
+    latent_dist = encoder_output.latent_dist 
+
+    if sample_mode == "sample":
+        return latent_dist.sample(key)
+    elif sample_mode == "argmax":
+        return latent_dist.mode()
+    elif sample_mode == "latents":
+        return encoder_output.latents
+    else:
+        raise ValueError(f"Invalid sample_mode: {sample_mode}")
+
+# convert helper functions to jax.numpy
+def prepare_image_latents(image, params, batch_size, num_images_per_prompt, dtype, do_classifier_free_guidance, key):
+
+    if image.shape[1] == 4:
+        image_latents = image
+    else:
+        image_latents = retrieve_latents_jax(image, params, key, sample_mode="argmax")
+
+    batch_size_adjusted = batch_size * num_images_per_prompt
+    # Handling different batch sizes
+    if batch_size_adjusted > image_latents.shape[0] and batch_size_adjusted % image_latents.shape[0] == 0:
+        additional_image_per_prompt = batch_size_adjusted // image_latents.shape[0]
+        image_latents = jnp.concatenate([image_latents] * additional_image_per_prompt, axis=0)
+    elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
+        raise ValueError(
+                f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
+            )
+    else:
+        image_latents = jnp.concatenate([image_latents], axis=0)
+
+    if do_classifier_free_guidance:
+        uncond_image_latents = jnp.zeros_like(image_latents)
+        # NOTE: Instruct Pix2Pix conditions on both text, image and condition free guidance
+        image_latents = jnp.concatenate([image_latents, image_latents, uncond_image_latents], axis=0)
+
+
+    print("return image_latents.shape", image_latents.shape)
+    return image_latents
 
 
 
@@ -528,8 +535,6 @@ def aot_compile(
             # Assume sharded
             guidance_scale = guidance_scale[:, None]
 
-    g = jnp.array([guidance_scale] * prompt_ids.shape[0], dtype=jnp.float32)
-    g = g[:, None]
     # Static argnums are pipe, start_timestep, num_inference_steps, height, width
     # Non-static (0) args are (sharded) input tensors mapped over their first dimension : prompt_ids, image, params, prng_seed,...,guidance_scale, noise, neg_prompt_ids,
     #in_axes=(None, 0, 0, 0, 0, None, None, None, None, 0, 0, 0),
@@ -551,7 +556,7 @@ def aot_compile(
                 num_inference_steps,  # static
                 height,  # static
                 width,  # static
-                g, 
+                guidance_scale, 
                 None, # noise
                 neg_prompt_ids 
             )
@@ -597,7 +602,7 @@ def generate(prompt, image, negative_prompt, seed=0, guidance_scale=7.5):
 # %% 
 # Middle of the road inference time
 start = time.time()
-images = generate(prompts, init_img, neg_prompts)
+images = generate(text_prompts, pil_images, raw_neg_prompts)
 images[0].show()
 print(f"Inference in {time.time() - start}")
 # ~3.05
@@ -605,7 +610,7 @@ print(f"Inference in {time.time() - start}")
 # %%
 # Compiled function is now fully cached and so inference is at optimal speeds
 start = time.time()
-images = generate(prompts, init_img, neg_prompts)
+images = generate(text_prompts, pil_images, raw_neg_prompts)
 images[2].show()
 print(f"Inference in {time.time() - start}")
 # ~2.71s 
