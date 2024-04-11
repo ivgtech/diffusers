@@ -27,12 +27,16 @@ vae, vae_state = FlaxAutoencoderKL.from_pretrained(
     subfolder="vae",
 )
 
-# Flax does not have a EulerAncestralDiscreteScheduler
-scheduler, scheduler_state = FlaxEulerDiscreteScheduler.from_pretrained(
-    'timbrooks/instruct-pix2pix',
-    from_pt=True,
-    revision='main', # pytorch revision
-    subfolder='scheduler',
+# # Flax does not have a EulerAncestralDiscreteScheduler
+# scheduler, scheduler_state = FlaxEulerDiscreteScheduler.from_pretrained(
+#     'timbrooks/instruct-pix2pix',
+#     from_pt=True,
+#     revision='main', # pytorch revision
+#     subfolder='scheduler',
+# )
+
+scheduler = FlaxPNDMScheduler(
+    beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", skip_prk_steps=True
 )
 
 unet, unet_state = FlaxUNet2DConditionModel.from_pretrained(
@@ -45,7 +49,6 @@ unet, unet_state = FlaxUNet2DConditionModel.from_pretrained(
 safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
     "CompVis/stable-diffusion-safety-checker", from_pt=True
 )
-
 
 # Create a Flax wrapper pipeline class 
 pipeline = FlaxStableDiffusionPipeline(
@@ -63,8 +66,8 @@ pipeline = FlaxStableDiffusionPipeline(
 
 assert pipeline.unet.in_channels == 8, 'Expected the Instruct-Pix2Pix model to have 8 input channels instead'
 
-outdir = '../flax_models/instruct-pix2pix'
 text_encoder_state = text_encoder._params
+outdir = '/home/v/diffusers/examples/flax_models/instruct-pix2pix'
 
 if not os.path.exists(outdir):
 

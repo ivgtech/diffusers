@@ -1,4 +1,5 @@
-# %% 
+# %%
+
 import os
 import sys
 import time
@@ -93,7 +94,10 @@ from jax_dataloader import NumpyLoader, train_dataset, show_batch, batch_to_pil_
 
 DEBUG = False 
 
+
+
 # Training data
+
 # NOTE: shapes are (1, 3, 256, 256), (1, 3, 256, 256), (1, 77)
 #    dict_keys(['original_pixel_values', 'edited_pixel_values', 'input_ids'])
 
@@ -103,30 +107,14 @@ training_generator = NumpyLoader(
     batch_size=batch_size,
     num_workers= 0
 )
+
 batch = next(iter(training_generator))
 show_batch(batch)
 
 
-# Models
-dtype = jax.numpy.bfloat16
-pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
-    '../flax_models/instruct-pix2pix',
-)
+# %% 
 
-vae = pipeline.vae
-text_encoder = pipeline.text_encoder
-tokenizer = pipeline.tokenizer
-unet = pipeline.unet
-scheduler = pipeline.scheduler
-safety_checker = pipeline.safety_checker
-feature_extractor = pipeline.feature_extractor
-dtype = pipeline.dtype
-
-
-
-
-
-# Helper functions
+# #Helper functions
 
 def create_key(seed=0):
     return jax.random.PRNGKey(seed)
@@ -292,12 +280,28 @@ def encode_prompt(
     return prompt_embeds, pooled_prompt_embeds
 
 
+# %%
 
+# Models
 
+dtype = jax.numpy.bfloat16
+pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
+    '../flax_models/stable-diffusion-v1-5', # 'runwayml/stable-diffusion-v1-5',
+    revision='flax',
+    dtype=dtype,
+)
 
+vae = pipeline.vae
+text_encoder = pipeline.text_encoder
+tokenizer = pipeline.tokenizer
+unet = pipeline.unet
+scheduler = pipeline.scheduler
+safety_checker = pipeline.safety_checker
+feature_extractor = pipeline.feature_extractor
+dtype = pipeline.dtype
 
 # %%
-# (2) Model functions
+# Model functions
 
 
 
@@ -311,8 +315,7 @@ def my_generate(
     num_inference_steps: int = 100,
     height: int = None,
     width: int = None,
-    guidance_scale: Union[float, jnp.ndarray] = 7.5,
-    image_guidance_scale: Union[float, jnp.ndarray] = 1.5,
+    guidance_scale: float = 7.5,
     latents: Optional[jnp.ndarray] = None,
     neg_prompt_ids: Optional[jnp.ndarray] = None,
 ):
@@ -337,15 +340,10 @@ def my_generate(
         uncond_input = neg_prompt_ids
     negative_prompt_embeds = text_encoder(uncond_input, params=params["text_encoder"])[0]
     
-    # For classifier free guidance, we need to do two forward passes.
-    # Here we concatenate the unconditional and text embeddings into a single batch
-    # to avoid doing two forward passes
-    # pix2pix has two negative embeddings, and unlike in other pipelines latents are ordered [prompt_embeds, negative_prompt_embeds, negative_prompt_embeds]
-    context = jnp.concatenate([prompt_embeds, negative_prompt_embeds, negative_prompt_embeds ])
-    #context = _encode_prompt(prompt_ids, 1, neg_prompt_ids) 
+    # context = jnp.concatenate([prompt_embeds, negative_prompt_embeds, negative_prompt_embeds ])
+    context = jnp.concatenate([negative_prompt_embeds, prompt_embeds])
 
-    # Ensure model output will be `float32` before going into the scheduler
-    # guidance_scale = jnp.array([guidance_scale], dtype=jnp.float32)
+    guidance_scale = jnp.array([guidance_scale], dtype=jnp.float32)
 
     num_channels_latents = vae.config.latent_channels
     latents_shape = (
@@ -362,8 +360,8 @@ def my_generate(
             raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {latents_shape}")
 
     # Create image latents
-    image_latents = prepare_image_latents(image, params, batch_size, 1, True, prng_seed)
-    image_latents = image_latents.transpose((0, 3, 1, 2))
+    # image_latents = prepare_image_latents(image, params, batch_size, 1, True, prng_seed)
+    # image_latents = image_latents.transpose((0, 3, 1, 2))
     # Create init_latents
     init_latent_dist = vae.apply({"params": params["vae"]}, image, method=vae.encode).latent_dist
     init_latents = init_latent_dist.sample(key=prng_seed).transpose((0, 3, 1, 2))
@@ -371,30 +369,11 @@ def my_generate(
 
     def loop_body(step, args):
         latents, scheduler_state = args
-        # For classifier free guidance, we need to do two forward passes.
-        # Here we concatenate the unconditional and text embeddings into a single batch
-        # to avoid doing two forward passes
+        latents_input = jnp.concatenate([latents] * 2)
 
-        # Expand the latents if we are doing classifier free guidance.
-        # The latents are expanded 3 times because for pix2pix the guidance\
-        # is applied for both the text and the input image.
-        latents_input = jnp.concatenate([latents] * 3)
-
-        ###
         t = jnp.array(scheduler_state.timesteps, dtype=jnp.int32)[step]
-
-        # concat latents, image_latents in the channel dimension
         timestep = jnp.broadcast_to(t, latents_input.shape[0])
         latents_input = scheduler.scale_model_input(scheduler_state, latents_input, t)
-
-        latents_input = jnp.concatenate([latents_input, image_latents], axis=1)
-        ###
-
-        # t = jnp.array(scheduler_state.timesteps, dtype=jnp.int32)[step]
-        # timestep = jnp.broadcast_to(t, latents_input.shape[0])
-
-        # latents_input = scheduler.scale_model_input(scheduler_state, latents_input, t)
-
 
         # predict the noise residual
         noise_pred = unet.apply(
@@ -404,16 +383,8 @@ def my_generate(
             encoder_hidden_states=context,
         ).sample
 
-        noise_pred_text, noise_pred_image, noise_pred_uncond = jnp.split(noise_pred, 3, axis=0)
-
-        noise_pred = (
-            noise_pred_uncond
-            + guidance_scale * (noise_pred_text - noise_pred_image)
-            + image_guidance_scale * (noise_pred_image - noise_pred_uncond)
-        )
-        # perform guidance
-        # noise_pred_uncond, noise_prediction_text = jnp.split(noise_pred, 2, axis=0)
-        # noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
+        noise_pred_uncond, noise_prediction_text = jnp.split(noise_pred, 2, axis=0)
+        noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
 
         # compute the previous noisy sample x_t -> x_t-1
         latents, scheduler_state = scheduler.step(scheduler_state, noise_pred, t, latents).to_tuple()
@@ -424,21 +395,15 @@ def my_generate(
         params["scheduler"], num_inference_steps=num_inference_steps, shape=latents_shape
     )
 
-    # latent_timestep = scheduler_state.timesteps[start_timestep : start_timestep + 1].repeat(batch_size)
-    # # timestep index for the latents (convert from float32 to int32)
-    # latent_timestep = jnp.array(latent_timestep, dtype=jnp.int32)
-    # latents = scheduler.add_noise(params["scheduler"], init_latents, latents, latent_timestep) # TODO: exception here
-
-
     # scale the initial noise by the standard deviation required by the scheduler
     latents = latents * params["scheduler"].init_noise_sigma
 
     if DEBUG:
         # run with python for loop
-        for i in range(num_inference_steps):
+        for i in range(start_timestep, num_inference_steps):
             latents, scheduler_state = loop_body(i, (latents, scheduler_state))
     else:
-        latents, _ = jax.lax.fori_loop(0, num_inference_steps, loop_body, (latents, scheduler_state))
+        latents, _ = jax.lax.fori_loop(start_timestep, num_inference_steps, loop_body, (latents, scheduler_state))
 
     # scale and decode the image latents with vae
     latents = 1 / vae.config.scaling_factor * latents
@@ -523,17 +488,13 @@ def prepare_image_latents(image, params, batch_size, num_images_per_prompt, do_c
 
 # %%
 
-# (3) Ahead of time compilation 
+# Ahead of time compilation (AOT)
 
 # original_images, edited_images, prompt_ids = batch['original_pixel_values'], batch['edited_pixel_values'], batch['input_ids']
 # pil_images, _ , text_prompts = batch_to_pil_plus_text(batch, tokenizer)
-
 # raw_neg_prompts = [""] * len(prompt_ids)
 # neg_prompts = tokenizer(raw_neg_prompts, padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="np").input_ids
-
 # height, width = pil_images[0].size  # NOTE: height and width are the same for all images in the batch
-
-
 
 def download_image(url):
     response = requests.get(url)
@@ -541,7 +502,6 @@ def download_image(url):
 url = "https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png"
 image = download_image(url).resize((512, 512))
 prompt = "make the mountains snowy"
-
 
 height, width = image.size
 pil_images = image
@@ -552,15 +512,17 @@ prompt_ids = tokenizer(text_prompts, padding="max_length", max_length=tokenizer.
 neg_prompt_ids  = None
 
 num_inference_steps = 100 
-image_guidance_scale = 1.2
+image_guidance_scale = 1.5
 guidance_scale = 7.5
 strength = 1.0
-seed = 1371 
+seed = 0
 start_timestep = get_timestep_start(num_inference_steps, strength)
 p_params = replicate(params)
 
+# %% 
 
 prompt_ids, image_ids, neg_prompt_ids = prepare_inputs(prompt, image, negative_prompt=None, tokenizer=pipeline.tokenizer)
+
 
 def aot_compile(
     prompt_ids=prompt_ids,
@@ -573,7 +535,7 @@ def aot_compile(
     p_rng = jax.random.split(rng, NUM_DEVICES)
 
     return (
-        pmap(my_generate, static_broadcasted_argnums=[4, 5, 6, 7, 8]) 
+        pmap(my_generate, static_broadcasted_argnums=[4, 5, 6]) 
         .lower(
                 p_prompt_ids,
                 p_image_ids,
@@ -582,11 +544,11 @@ def aot_compile(
                 num_inference_steps, # static (4)
                 height, # static (5)
                 width, # static (6)
-                guidance_scale, # static (7)
-                image_guidance_scale, # static (8)
         )
         .compile()
     )
+
+
 
 
 
@@ -595,6 +557,7 @@ def aot_compile(
 # Initial compilation 
 start = time.time()
 p_generate = aot_compile()
+
 print(f"Inference in {time.time() - start}")
 # 102.0s if not cc cached, otherwise >12s
 
@@ -617,41 +580,20 @@ def generate(prompt, image, seed=0):
 # Middle of the road inference time
 start = time.time()
 images = generate(text_prompts, pil_images)
+images[0].show()
 print(f"Inference in {time.time() - start}")
 # ~3.05
 
 # Fastest as function is fully cached
 start = time.time()
 images = generate(text_prompts, pil_images)
+images[2].show()
 print(f"Inference in {time.time() - start}")
 # ~2.71s 
 
+# %%
 # Plot all images
-image.show()
 make_image_grid(images, rows=len(images)//4, cols=4)
 
-# %%
 
-# (4) Editing a different image and prompt (no recompilation) 
-
-
-img_path = '/home/v/instruct-pix2pix/imgs/example.jpg'
-with open(img_path, 'rb') as f:
-    image = Image.open(f).convert("RGB").resize((512, 512))
-prompt = "turn him into cyborg"
-
-start = time.time()
-images = generate(prompt, image)
-print(f"Inference in {time.time() - start}")
-# ~2.7s 
-
-image.show()
-make_image_grid(images, rows=len(images)//4, cols=4)
-
-# %%
-
-image.save('images/example_mountains.png')
-title = 'mountains'
-for i, img in enumerate(images):  
-    img.save(f"images/april_11_{title}{i}.png")
 # %%
