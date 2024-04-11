@@ -650,7 +650,7 @@ make_image_grid(images, rows=len(images)//4, cols=4)
 
 # %%
 
-image.save('images/example_mountains.png')
+pil_images.save('images/example_mountains.png')
 title = 'mountains'
 for i, img in enumerate(images):  
     img.save(f"images/april_11_{title}{i}.png")
