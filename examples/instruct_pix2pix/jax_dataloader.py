@@ -409,6 +409,30 @@ def plot_batch(sample, tokenizer):
 def batch_to_pil_plus_text(batch, tokenizer):
     original_images = batch["original_pixel_values"]
     edited_images = batch["edited_pixel_values"]
+    captions = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
+    org_numpy_images, ed_numpy_images, texts = [], [], [] 
+    for original_image, edited_image, caption in zip(original_images, edited_images, captions):
+        # is original_image object a PIL image?
+        if isinstance(original_image, PIL.Image.Image):
+            original_image = (original_image.permute(1, 2, 0) + 1) / 2
+        else:
+            original_image = (original_image.transpose(1, 2, 0) + 1) / 2
+            
+        if isinstance(edited_image, PIL.Image.Image):
+            edited_image = (edited_image.permute(1, 2, 0) + 1) / 2
+        else:
+            edited_image = (edited_image.transpose(1, 2, 0) + 1) / 2
+        org_numpy_images.append(original_image)
+        ed_numpy_images.append(edited_image)
+        texts.append(caption)
+    
+    op_images = numpy_to_pil(np.array(org_numpy_images))
+    ed_images = numpy_to_pil(np.array(ed_numpy_images))
+    return op_images, ed_images, texts
+
+def xbatch_to_pil_plus_text(batch, tokenizer):
+    original_images = batch["original_pixel_values"]
+    edited_images = batch["edited_pixel_values"]
 
     # (batch_size, 3, 256, 256) -> (batch_size, 256, 256, 3)
     original_images = np.transpose(original_images, (0, 2, 3, 1))
