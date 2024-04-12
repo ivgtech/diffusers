@@ -803,6 +803,11 @@ def main():
                     progress_bar.update(1)
                 continue
 
+
+
+
+
+            #######################################
             with accelerator.accumulate(unet):
                 # We want to learn the denoising process w.r.t the edited images which
                 # are conditioned on the original image (which was edited) and the edit instruction.
@@ -875,6 +880,14 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+
+
+            #######################################
+
+            
+            
+            
+            
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
