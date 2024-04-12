@@ -1,4 +1,5 @@
 # %% 
+
 import os
 import sys
 import time
@@ -57,20 +58,26 @@ from transformers import (
     CLIPTokenizer, 
     FlaxCLIPTextModel
     )
+
 from diffusers import (
     FlaxAutoencoderKL,
-    FlaxDDPMScheduler,
-    FlaxDDIMScheduler,
-    FlaxDPMSolverMultistepScheduler,
-    FlaxEulerDiscreteScheduler,
-    FlaxLMSDiscreteScheduler,
-    FlaxPNDMScheduler,
     FlaxStableDiffusionPipeline,
     FlaxUNet2DConditionModel,
     FlaxStableDiffusionImg2ImgPipeline,
     FlaxStableDiffusionInstructPix2PixPipeline,
     FlaxDiffusionPipeline,
     )
+
+from diffusers import (
+    FlaxLMSDiscreteScheduler, 
+    FlaxDDPMScheduler, 
+    FlaxPNDMScheduler, 
+    FlaxDPMSolverMultistepScheduler, 
+    FlaxDDIMScheduler, 
+    FlaxEulerDiscreteScheduler
+    )
+
+from diffusers import EulerAncestralDiscreteScheduler
 
 from diffusers.utils import make_image_grid
 from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecker
@@ -108,23 +115,33 @@ show_batch(batch)
 
 
 # Models
+
 dtype = jax.numpy.bfloat16
 pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
     '../flax_models/instruct-pix2pix',
 )
 
+# NOTE: flax does not have a EulerAncestralDiscreteScheduler scheduler,
+# so we need to extract the config and create a new scheduler
+scheduler, scheduler_state = FlaxPNDMScheduler.from_pretrained(
+    'runwayml/stable-diffusion-v1-5', # 'timbrooks/instruct-pix2pix',
+    subfolder='scheduler'
+)
+
+params["scheduler"] = scheduler_state
+
 vae = pipeline.vae
 text_encoder = pipeline.text_encoder
 tokenizer = pipeline.tokenizer
 unet = pipeline.unet
-scheduler = pipeline.scheduler
+# scheduler = pipeline.scheduler
 safety_checker = pipeline.safety_checker
 feature_extractor = pipeline.feature_extractor
 dtype = pipeline.dtype
 
 
 
-
+# %% 
 
 # Helper functions
 
@@ -505,19 +522,7 @@ def prepare_image_latents(image, params, batch_size, num_images_per_prompt, do_c
         # NOTE: Instruct Pix2Pix conditions on both text, image and condition free guidance
         image_latents = jnp.concatenate([image_latents, image_latents, uncond_image_latents], axis=0)
 
-
-    print("return image_latents.shape", image_latents.shape)
     return image_latents
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -620,7 +625,7 @@ images = generate(text_prompts, pil_images)
 print(f"Inference in {time.time() - start}")
 # ~3.05
 
-# Fastest as function is fully cached
+# Function fully cached
 start = time.time()
 images = generate(text_prompts, pil_images)
 print(f"Inference in {time.time() - start}")
@@ -633,9 +638,8 @@ make_image_grid(images, rows=len(images)//4, cols=4)
 # %%
 
 # (4) Editing a different image and prompt (no recompilation) 
-
-
 img_path = '/home/v/instruct-pix2pix/imgs/example.jpg'
+
 with open(img_path, 'rb') as f:
     image = Image.open(f).convert("RGB").resize((512, 512))
 prompt = "turn him into cyborg"
@@ -650,8 +654,11 @@ make_image_grid(images, rows=len(images)//4, cols=4)
 
 # %%
 
-pil_images.save('images/example_mountains.png')
-title = 'mountains'
-for i, img in enumerate(images):  
-    img.save(f"images/april_11_{title}{i}.png")
-# %%
+# Save images
+
+# pil_images.save('images/example_mountains.png')
+# title = 'mountains'
+# for i, img in enumerate(images):  
+#     img.save(f"images/april_11_{title}{i}.png")
+
+# # %%

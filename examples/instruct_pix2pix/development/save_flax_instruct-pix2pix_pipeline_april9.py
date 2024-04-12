@@ -28,7 +28,18 @@ vae, vae_state = FlaxAutoencoderKL.from_pretrained(
 )
 
 # # Flax does not have a EulerAncestralDiscreteScheduler
-# scheduler, scheduler_state = FlaxEulerDiscreteScheduler.from_pretrained(
+# from diffusers import StableDiffusionInstructPix2PixPipeline
+# from diffusers import EulerAncestralDiscreteScheduler
+# pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+#     "timbrooks/instruct-pix2pix",
+#     torch_dtype=torch.float16, 
+#     safety_checker=None
+# )
+# pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+
+# # scheduler, scheduler_state = FlaxEulerDiscreteScheduler.from_pretrained(
+# from diffusers import EulerAncestralDiscreteScheduler
+# scheduler = EulerAncestralDiscreteScheduler.from_pretrained(
 #     'timbrooks/instruct-pix2pix',
 #     from_pt=True,
 #     revision='main', # pytorch revision
