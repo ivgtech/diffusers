@@ -149,6 +149,9 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
         super().__init__()
         self.dtype = dtype
 
+        # Set in_channels to 8
+        #unet.config.in_channels = 8
+
         if safety_checker is None:
             logger.warning(
                 f"You have disabled the safety checker for {self.__class__} by passing `safety_checker=None`. Ensure"

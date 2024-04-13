@@ -16,7 +16,6 @@ from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
 from jax.experimental.compilation_cache import compilation_cache as cc
 cc.set_cache_dir("/tmp/sd_cache")
 
-# %% 
 def download_image(url):
     response = requests.get(url)
     return Image.open(BytesIO(response.content)).convert("RGB")
@@ -32,13 +31,12 @@ def create_key(seed=0):
 
 
 pipeline, params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
-  '../flax_models/instruct-pix2pix',
-  # './instruct-pix2pix-model', 
+  # '../flax_models/instruct-pix2pix',
+   './instruct-pix2pix-model', 
     dtype=jnp.bfloat16,
     safety_checker=None
 )
 
-# %%
 rng = create_key(1371)
 num_samples = jax.device_count()
 rng = jax.random.split(rng, jax.device_count())
@@ -61,9 +59,27 @@ output = pipeline(
 ).images
 
 output_images = pipeline.numpy_to_pil(np.asarray(output.reshape((num_samples,) + output.shape[-3:])))
-# %%
 
 
 from diffusers.utils import make_image_grid
 make_image_grid(output_images, rows=len(output_images)//4, cols=4)
+# %%
+import torch  
+from diffusers import StableDiffusionInstructPix2PixPipeline
+from diffusers import FlaxStableDiffusionInstructPix2PixPipeline
+
+model_id = "timbrooks/instruct-pix2pix"
+
+pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+     model_id, 
+    torch_dtype=torch.float16, 
+    safety_checker=None
+)
+unet , unet= FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
+    model_id, 
+    from_pt=True,
+)
+
+
+
 # %%

@@ -382,12 +382,9 @@ def main():
         dtype=weight_dtype,
     )
 
-    unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(
-    './modified_unet' , 
-    in_channels= 8,
-    revision='flax',
-    dtype=jnp.bfloat16,
-    )
+    # Load the converted unet model
+    save_dir = 'modified_unet'
+    unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(save_dir, dtype=jnp.bfloat16)
 
     # Optimization
 

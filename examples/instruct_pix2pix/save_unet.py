@@ -11,6 +11,11 @@ from flax.training.common_utils import shard
 from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
 from diffusers import FlaxUNet2DConditionModel
 
+model_id = 'runwayml/stable-diffusion-v1-5'
+unet = FlaxUNet2DConditionModel.from_pretrained(model_id, subfolder="unet", revision='flax', in_channels=8, low_cpu_mem_usage=False, ignore_mismatched_sizes=True)
+
+
+
 unet, state = FlaxUNet2DConditionModel.from_pretrained(
   'runwayml/stable-diffusion-v1-5',
   revision='flax',
