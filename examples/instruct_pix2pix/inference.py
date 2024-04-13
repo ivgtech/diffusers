@@ -31,8 +31,8 @@ def create_key(seed=0):
 
 
 pipeline, params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
-  # '../flax_models/instruct-pix2pix',
-   './instruct-pix2pix-model', 
+   '../flax_models/instruct-pix2pix',
+  # './instruct-pix2pix-model', 
     dtype=jnp.bfloat16,
     safety_checker=None
 )

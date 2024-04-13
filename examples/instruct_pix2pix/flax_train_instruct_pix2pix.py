@@ -1,5 +1,6 @@
 # %% 
 
+import copy
 import argparse
 import logging
 import math
@@ -17,6 +18,8 @@ import transformers
 from datasets import load_dataset
 from flax import jax_utils
 from flax.training import train_state
+from flax.training.train_state import TrainState
+
 from flax.training.common_utils import shard
 from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
 from huggingface_hub import create_repo, upload_folder
@@ -106,6 +109,12 @@ args = {
 'resume_from_checkpoint': None,
 'enable_xformers_memory_efficient_attention': True,
 'from_pt': False,
+'max_ema_decay': 0.999,
+'min_ema_decay': 0.5,
+'ema_decay_power': 0.6666666,
+'ema_inv_gamma': 1.0,
+'start_ema_update_after': 100,
+'update_ema_every': 10,
 }
 
 class Args:
@@ -323,9 +332,146 @@ def curry_retrieve_and_transform(NHWC_to_NCHW_func):
     return retrieve_and_transform
 
 
+def ema_update(
+    params: FrozenDict,
+    ema_params: FrozenDict,
+    steps: int,
+    max_ema_decay: float = 0.999,
+    min_ema_decay: float = 0.5,
+    ema_decay_power: float = 0.6666666,
+    ema_inv_gamma: float = 1.0,
+    start_ema_update_after: int = 100,
+    update_ema_every: int = 10,
+) -> FrozenDict:
+    """Incorporates updated model parameters into an exponential moving averaged
+    version of a model. It should be called after each optimizer step."""
+
+    def calculate_decay():
+        decay = 1.0 - (1.0 + (steps / ema_inv_gamma)) ** (-ema_decay_power)
+        return np.clip(decay, min_ema_decay, max_ema_decay)
+
+    if steps < start_ema_update_after:
+        """When EMA is not updated, return the current params"""
+        return params
+
+    if steps % update_ema_every == 0:
+        decay = calculate_decay()
+        decay_avg = 1.0 - decay
+
+        return jax.tree_util.tree_map(
+            lambda ema, p_new: decay_avg * ema + decay * p_new,
+            ema_params,
+            params,
+        )
+
+    return ema_params
+
+
+def get_nparams(params: FrozenDict) -> int:
+    nparams = 0
+    for item in params:
+        if isinstance(params[item], FrozenDict) or isinstance(params[item], dict):
+            nparams += get_nparams(params[item])
+        else:
+            nparams += params[item].size
+    return nparams
+
+from typing import Any, Callable
+import optax
+from flax import core, struct
+from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT
+
+class EMAState(struct.PyTreeNode):
+    """
+    Extends the TrainState to include exponential moving average (EMA) of the model parameters.
+    
+    Attributes:
+        ema_params: A FrozenDict containing the EMA of the parameters.
+    """
+    ema_params: core.FrozenDict[str, Any] = struct.field(pytree_node=True)
+
+
+class ExtendedTrainState(TrainState, EMAState):
+    """
+    A simple train state for the common case with a single Optax optimizer that also tracks
+    the exponential moving average (EMA) of the model parameters.
+
+    This state is extended to handle both the raw model parameters and their EMA values for
+    training and validation purposes, respectively.
+    """
+
+    def apply_gradients(self, grads: core.FrozenDict[str, Any], ema_decay: float = 0.999) -> "ExtendedTrainState":
+        """
+        Apply gradients to parameters and update EMA parameters.
+        
+        Args:
+            grads: Gradients computed during backpropagation to be applied to the parameters.
+            ema_decay: The decay factor for the EMA parameters.
+
+        Returns:
+            An updated instance of `ExtendedTrainState` with updated params and ema_params.
+        """
+        # Standard parameter update
+        updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
+        new_params = optax.apply_updates(self.params, updates)
+        
+        # Update EMA parameters
+        new_ema_params = jax.tree.map(
+            lambda ema, p: ema * ema_decay + (1 - ema_decay) * p, self.ema_params, new_params
+        )
+        
+        return self.replace(params=new_params, opt_state=new_opt_state, ema_params=new_ema_params)
 
 
 
+
+
+# Training dataloader
+
+# Creates a JAX generator from a standard PyTorch dataloader
+train_dataloader = NumpyLoader(
+    train_dataset, 
+    batch_size=args.train_batch_size,
+    num_workers= 0
+)
+
+# Models and state
+
+weight_dtype = jnp.float32
+if args.mixed_precision == "fp16":
+    weight_dtype = jnp.float16
+elif args.mixed_precision == "bf16":
+    weight_dtype = jnp.bfloat16
+
+# Load models and create wrapper for stable diffusion
+tokenizer = CLIPTokenizer.from_pretrained(
+    args.pretrained_model_name_or_path,
+    from_pt=args.from_pt,
+    revision=args.revision,
+    subfolder="tokenizer",
+)
+text_encoder = FlaxCLIPTextModel.from_pretrained(
+    args.pretrained_model_name_or_path,
+    from_pt=args.from_pt,
+    revision=args.revision,
+    subfolder="text_encoder",
+    dtype=weight_dtype,
+)
+vae, vae_params = FlaxAutoencoderKL.from_pretrained(
+    args.pretrained_model_name_or_path,
+    from_pt=args.from_pt,
+    revision=args.revision,
+    subfolder="vae",
+    dtype=weight_dtype,
+)
+
+# Load the converted unet model
+save_dir = 'modified_unet'
+unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(save_dir, dtype=jnp.bfloat16)
+
+
+
+# %% 
 
 def main():
 
@@ -341,7 +487,6 @@ def main():
         transformers.utils.logging.set_verbosity_error()
 
     if args.seed is not None: set_seed(args.seed)
-
 
     # Training dataloader
 
@@ -386,6 +531,11 @@ def main():
     save_dir = 'modified_unet'
     unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(save_dir, dtype=jnp.bfloat16)
 
+
+
+
+
+
     # Optimization
 
     total_train_batch_size = args.train_batch_size * jax.local_device_count()
@@ -407,7 +557,14 @@ def main():
         adamw,
     )
 
-    state = train_state.TrainState.create(apply_fn=unet.__call__, params=unet_params, tx=optimizer)
+    print("Number of unet parameters: ", get_nparams(unet_params))
+
+    # Initialize EMA params with original model params
+    ema_params = copy.deepcopy(unet_params)
+    print("Number of EMA parameters: ", get_nparams(ema_params))
+
+    # Prepare optimizer and state, including EMA parameters
+    state = ExtendedTrainState.create(apply_fn=unet.__call__, params=unet_params, ema_params=ema_params, tx=optimizer)
 
     noise_scheduler = FlaxDDPMScheduler(
         beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000
@@ -420,14 +577,14 @@ def main():
 
     # print("Starting training...")
     # return 0
-
+    
     def train_step(state, text_encoder_params, vae_params, batch, train_rng):
         dropout_rng, sample_rng, new_train_rng = jax.random.split(train_rng, 3)
 
         def compute_loss(params):
             # Convert images to latent space
             vae_outputs = vae.apply(
-                {"params": vae_params}, batch["original_pixel_values"], deterministic=True, method=vae.encode
+                {"params": vae_params}, batch["edited_pixel_values"], deterministic=True, method=vae.encode
             )
             latents = vae_outputs.latent_dist.sample(sample_rng)
             # (NHWC) -> (NCHW)
@@ -445,7 +602,6 @@ def main():
                 0,
                 noise_scheduler.config.num_train_timesteps,
             )
-
             # Add noise to the latents according to the noise magnitude at each timestep
             # (this is the forward diffusion process)
             noisy_latents = noise_scheduler.add_noise(noise_scheduler_state, latents, noise, timesteps)
@@ -457,18 +613,19 @@ def main():
                 train=False,
             )[0]
 
-
             # Get the additional image embedding for conditioning.
             # Instead of getting a diagonal Gaussian here, we simply take the mode.
-            image_rng , _ = jax.random.split(noise_rng)
-            original_image_embeds = retrieve_latents_jax(batch["original_pixel_values"], vae, vae_params , image_rng, sample_mode="argmax") 
+            vae_image_outputs = vae.apply(
+                {"params": vae_params}, batch["original_pixel_values"], deterministic=True, method=vae.encode
+            )
+            original_image_embeds = vae_image_outputs.latent_dist.mode()
             # (NHWC) -> (NCHW)
             original_image_embeds = jnp.einsum("ijkl->iljk", original_image_embeds)
 
             # TODO: Implement conditioning dropout
 
             # Concatenate the `original_image_embeds` with the `noisy_latents`.
-            concatenated_noisy_latents = jnp.concatenate([latents, original_image_embeds], axis=1)
+            concatenated_noisy_latents = jnp.concatenate([noisy_latents, original_image_embeds], axis=1)
 
             # Predict the noise residual and compute loss
             model_pred = unet.apply(
@@ -527,7 +684,6 @@ def main():
     global_step = 0
 
 
-
     epochs = tqdm(range(args.num_train_epochs), desc="Epoch ... ", position=0)
     for epoch in epochs:
         # ======================== Training ================================
@@ -542,6 +698,19 @@ def main():
             state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, batch, train_rngs)
             train_metrics.append(train_metric)
 
+            # Update EMA parameters
+            # state.ema_params = ema_update(
+            #     state.params,
+            #     state.ema_params,
+            #     global_step,
+            #     args.max_ema_decay,
+            #     args.min_ema_decay,
+            #     args.ema_decay_power,
+            #     args.ema_inv_gamma,
+            #     args.start_ema_update_after,
+            #     args.update_ema_every,
+            # )
+
             train_step_progress_bar.update(1)
 
             global_step += 1
@@ -552,6 +721,9 @@ def main():
 
         train_step_progress_bar.close()
         epochs.write(f"Epoch... ({epoch + 1}/{args.num_train_epochs} | Loss: {train_metric['loss']})")
+
+
+        
 
 
     def get_params_to_save(params):
@@ -581,12 +753,17 @@ def main():
                 "text_encoder": get_params_to_save(text_encoder_params),
                 "vae": get_params_to_save(vae_params),
                 "unet": get_params_to_save(state.params),
+                "ema": get_params_to_save(state.ema_params),    
+                # "tx": get_params_to_save(state.tx),
                 "safety_checker": safety_checker.params,
             },
         )
 
 
+# %%
+
 if __name__ == "__main__":
     main()
+
 
 # %%
