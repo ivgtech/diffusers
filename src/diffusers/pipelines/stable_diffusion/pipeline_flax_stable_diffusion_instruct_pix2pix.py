@@ -170,6 +170,52 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
         )
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
 
+
+    
+    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
+    def retrieve_latents_jax(self, image, params, key=None, sample_mode="sample"):
+        # pass the image through the VAE to get the latents
+        encoder_output = self.vae.apply({"params": params["vae"]}, image, method=self.vae.encode)
+
+        # get the latent distribution
+        latent_dist = encoder_output.latent_dist 
+
+        if sample_mode == "sample":
+            return latent_dist.sample(key)
+        elif sample_mode == "argmax":
+            return latent_dist.mode()
+        elif sample_mode == "latents":
+            return encoder_output.latents
+        else:
+            raise ValueError(f"Invalid sample_mode: {sample_mode}")
+
+    # convert helper functions to jax.numpy
+    def prepare_image_latents(self, image, params, batch_size, num_images_per_prompt, do_classifier_free_guidance, key):
+
+        if image.shape[1] == 4:
+            image_latents = image
+        else:
+            image_latents = self.retrieve_latents_jax(image, params, key, sample_mode="argmax")
+
+        batch_size_adjusted = batch_size * num_images_per_prompt
+        # Handling different batch sizes
+        if batch_size_adjusted > image_latents.shape[0] and batch_size_adjusted % image_latents.shape[0] == 0:
+            additional_image_per_prompt = batch_size_adjusted // image_latents.shape[0]
+            image_latents = jnp.concatenate([image_latents] * additional_image_per_prompt, axis=0)
+        elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
+            raise ValueError(
+                    f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
+                )
+        else:
+            image_latents = jnp.concatenate([image_latents], axis=0)
+
+        if do_classifier_free_guidance:
+            uncond_image_latents = jnp.zeros_like(image_latents)
+            # NOTE: Instruct Pix2Pix conditions on both text, image and condition free guidance
+            image_latents = jnp.concatenate([image_latents, image_latents, uncond_image_latents], axis=0)
+
+        return image_latents
+
     def prepare_inputs(self, prompt: Union[str, List[str]], image: Union[Image.Image, List[Image.Image]]):
         if not isinstance(prompt, (str, list)):
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
@@ -239,12 +285,12 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
         image: jnp.ndarray,
         params: Union[Dict, FrozenDict],
         prng_seed: jax.Array,
-        start_timestep: int,
-        num_inference_steps: int,
-        height: int,
-        width: int,
-        guidance_scale: float,
-        noise: Optional[jnp.ndarray] = None,
+        num_inference_steps: int = 100,
+        height: int = None,
+        width: int = None,
+        guidance_scale: Union[float, jnp.ndarray] = 7.5,
+        image_guidance_scale: Union[float, jnp.ndarray] = 1.5,
+        latents: Optional[jnp.ndarray] = None,
         neg_prompt_ids: Optional[jnp.ndarray] = None,
     ):
         if height % 8 != 0 or width % 8 != 0:
@@ -266,23 +312,34 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
         else:
             uncond_input = neg_prompt_ids
         negative_prompt_embeds = self.text_encoder(uncond_input, params=params["text_encoder"])[0]
-        context = jnp.concatenate([negative_prompt_embeds, prompt_embeds])
+        
+        # For classifier free guidance, we need to do two forward passes.
+        # Here we concatenate the unconditional and text embeddings into a single batch
+        # to avoid doing two forward passes
+        # pix2pix has two negative embeddings, and unlike in other pipelines latents are ordered [prompt_embeds, negative_prompt_embeds, negative_prompt_embeds]
+        context = jnp.concatenate([prompt_embeds, negative_prompt_embeds, negative_prompt_embeds ])
+        #context = _encode_prompt(prompt_ids, 1, neg_prompt_ids) 
 
-        # NOTE: The following line is a workaround for the fact that the instruct-pix2pix model expects 8 channelsk
-        self.unet.config.in_channels = 8
+        # Ensure model output will be `float32` before going into the scheduler
+        # guidance_scale = jnp.array([guidance_scale], dtype=jnp.float32)
 
+        num_channels_latents = self.vae.config.latent_channels
         latents_shape = (
             batch_size,
-            self.unet.config.in_channels,
+            num_channels_latents,
+            # unet.config.in_channels,
             height // self.vae_scale_factor,
             width // self.vae_scale_factor,
         )
-        if noise is None:
-            noise = jax.random.normal(prng_seed, shape=latents_shape, dtype=jnp.float32)
+        if latents is None:
+            latents = jax.random.normal(prng_seed, shape=latents_shape, dtype=jnp.float32)
         else:
-            if noise.shape != latents_shape:
-                raise ValueError(f"Unexpected latents shape, got {noise.shape}, expected {latents_shape}")
+            if latents.shape != latents_shape:
+                raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {latents_shape}")
 
+        # Create image latents
+        image_latents = self.prepare_image_latents(image, params, batch_size, 1, True, prng_seed)
+        image_latents = image_latents.transpose((0, 3, 1, 2))
         # Create init_latents
         init_latent_dist = self.vae.apply({"params": params["vae"]}, image, method=self.vae.encode).latent_dist
         init_latents = init_latent_dist.sample(key=prng_seed).transpose((0, 3, 1, 2))
@@ -293,12 +350,19 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and text embeddings into a single batch
             # to avoid doing two forward passes
-            latents_input = jnp.concatenate([latents] * 2)
+
+            # Expand the latents if we are doing classifier free guidance.
+            # The latents are expanded 3 times because for pix2pix the guidance\
+            # is applied for both the text and the input image.
+            latents_input = jnp.concatenate([latents] * 3)
 
             t = jnp.array(scheduler_state.timesteps, dtype=jnp.int32)[step]
-            timestep = jnp.broadcast_to(t, latents_input.shape[0])
 
+            # concat latents, image_latents in the channel dimension
+            timestep = jnp.broadcast_to(t, latents_input.shape[0])
             latents_input = self.scheduler.scale_model_input(scheduler_state, latents_input, t)
+
+            latents_input = jnp.concatenate([latents_input, image_latents], axis=1)
 
             # predict the noise residual
             noise_pred = self.unet.apply(
@@ -307,31 +371,42 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
                 jnp.array(timestep, dtype=jnp.int32),
                 encoder_hidden_states=context,
             ).sample
+
+            noise_pred_text, noise_pred_image, noise_pred_uncond = jnp.split(noise_pred, 3, axis=0)
+
+            noise_pred = (
+                noise_pred_uncond
+                + guidance_scale * (noise_pred_text - noise_pred_image)
+                + image_guidance_scale * (noise_pred_image - noise_pred_uncond)
+            )
             # perform guidance
-            noise_pred_uncond, noise_prediction_text = jnp.split(noise_pred, 2, axis=0)
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
+            # noise_pred_uncond, noise_prediction_text = jnp.split(noise_pred, 2, axis=0)
+            # noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
             latents, scheduler_state = self.scheduler.step(scheduler_state, noise_pred, t, latents).to_tuple()
             return latents, scheduler_state
 
+        # set the scheduler state
         scheduler_state = self.scheduler.set_timesteps(
             params["scheduler"], num_inference_steps=num_inference_steps, shape=latents_shape
         )
 
-        latent_timestep = scheduler_state.timesteps[start_timestep : start_timestep + 1].repeat(batch_size)
-
-        latents = self.scheduler.add_noise(params["scheduler"], init_latents, noise, latent_timestep)
+        # latent_timestep = scheduler_state.timesteps[start_timestep : start_timestep + 1].repeat(batch_size)
+        # # timestep index for the latents (convert from float32 to int32)
+        # latent_timestep = jnp.array(latent_timestep, dtype=jnp.int32)
+        # latents = scheduler.add_noise(params["scheduler"], init_latents, latents, latent_timestep) # TODO: exception here
 
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * params["scheduler"].init_noise_sigma
 
         if DEBUG:
             # run with python for loop
-            for i in range(start_timestep, num_inference_steps):
+            for i in range(num_inference_steps):
                 latents, scheduler_state = loop_body(i, (latents, scheduler_state))
         else:
-            latents, _ = jax.lax.fori_loop(start_timestep, num_inference_steps, loop_body, (latents, scheduler_state))
+            latents, _ = jax.lax.fori_loop(0, num_inference_steps, loop_body, (latents, scheduler_state))
+
 
         # scale and decode the image latents with vae
         latents = 1 / self.vae.config.scaling_factor * latents
@@ -347,15 +422,15 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
         image: jnp.ndarray,
         params: Union[Dict, FrozenDict],
         prng_seed: jax.Array,
-        strength: float = 0.8,
         num_inference_steps: int = 50,
         height: Optional[int] = None,
         width: Optional[int] = None,
         guidance_scale: Union[float, jnp.ndarray] = 7.5,
-        noise: jnp.ndarray = None,
+        image_guidance_scale: Union[float, jnp.ndarray] = 1.5,
+        latents: jnp.ndarray = None,
         neg_prompt_ids: jnp.ndarray = None,
         return_dict: bool = True,
-        jit: bool = False,
+        jit: bool = True,
     ):
         r"""
         The call function to the pipeline for generation.
@@ -423,7 +498,15 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
                 # Assume sharded
                 guidance_scale = guidance_scale[:, None]
 
-        start_timestep = self.get_timestep_start(num_inference_steps, strength)
+        if isinstance(image_guidance_scale, float):
+            # Convert to a tensor so each device gets a copy. Follow the prompt_ids for
+            # shape information, as they may be sharded (when `jit` is `True`), or not.
+            image_guidance_scale = jnp.array([image_guidance_scale] * prompt_ids.shape[0])
+            if len(prompt_ids.shape) > 2:
+                # Assume sharded
+                image_guidance_scale = image_guidance_scale[:, None]
+
+
 
         if jit:
             images = _p_generate(
@@ -432,27 +515,27 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
                 image,
                 params,
                 prng_seed,
-                start_timestep,
                 num_inference_steps,
                 height,
                 width,
                 guidance_scale,
-                noise,
+                image_guidance_scale,
+                latents,
                 neg_prompt_ids,
             )
         else:
             images = self._generate(
-                prompt_ids,
-                image,
-                params,
-                prng_seed,
-                start_timestep,
-                num_inference_steps,
-                height,
-                width,
-                guidance_scale,
-                noise,
-                neg_prompt_ids,
+            prompt_ids,
+            image,
+            params,
+            prng_seed,
+            num_inference_steps,
+            height,
+            width,
+            guidance_scale,
+            image_guidance_scale,
+            latents,
+            neg_prompt_ids,
             )
 
         if self.safety_checker is not None:
@@ -485,8 +568,8 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
 # Non-static args are (sharded) input tensors mapped over their first dimension (hence, `0`).
 @partial(
     jax.pmap,
-    in_axes=(None, 0, 0, 0, 0, None, None, None, None, 0, 0, 0),
-    static_broadcasted_argnums=(0, 5, 6, 7, 8),
+    in_axes=(None, 0, 0, 0, 0, None, None, None, 0, 0, 0, 0),
+    static_broadcasted_argnums=(0, 5, 6, 7),
 )
 def _p_generate(
     pipe,
@@ -494,12 +577,12 @@ def _p_generate(
     image,
     params,
     prng_seed,
-    start_timestep,
-    num_inference_steps,
+    num_inference_steps, # static (5)
     height,
     width,
     guidance_scale,
-    noise,
+    image_guidance_scale,
+    latents,
     neg_prompt_ids,
 ):
     return pipe._generate(
@@ -507,12 +590,12 @@ def _p_generate(
         image,
         params,
         prng_seed,
-        start_timestep,
         num_inference_steps,
         height,
         width,
         guidance_scale,
-        noise,
+        image_guidance_scale,
+        latents,
         neg_prompt_ids,
     )
 

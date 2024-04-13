@@ -18,7 +18,7 @@ from datasets import load_dataset
 from flax import jax_utils
 from flax.training import train_state
 from flax.training.common_utils import shard
-from flax.core.frozen_dict import unfreeze, freeze
+from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
 from huggingface_hub import create_repo, upload_folder
 from torchvision import transforms
 from tqdm.auto import tqdm
@@ -50,7 +50,6 @@ WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
 from jax_dataloader import NumpyLoader, train_dataset, show_batch, batch_to_pil_plus_text
 
 
-# %%
 
 # convert the namespace to a dictionary
 
@@ -115,7 +114,6 @@ class Args:
 
 args = Args(**args)
 
-# %%
 
 import PIL
 import requests
@@ -291,7 +289,6 @@ class JAXDataLoader:
 
 
 
-# %%
 
 # Helper functions
 
@@ -327,7 +324,6 @@ def curry_retrieve_and_transform(NHWC_to_NCHW_func):
 
 
 
-# %% 
 
 
 
@@ -386,51 +382,12 @@ def main():
         dtype=weight_dtype,
     )
 
-
-    pipeline, __params = FlaxStableDiffusionPipeline.from_pretrained(
-        '../flax_models/instruct-pix2pix',)
-
-
-    unet_config = pipeline.unet.config
-
-    unet = FlaxUNet2DConditionModel.from_config(unet_config)
-
-    _ , old_unet_params = FlaxUNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path,
-        from_pt=args.from_pt,
-        revision=args.revision,
-        subfolder="unet",
-        dtype=weight_dtype,
+    unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(
+    './modified_unet' , 
+    in_channels= 8,
+    revision='flax',
+    dtype=jnp.bfloat16,
     )
-
-    unet_config.in_channels = 8
-
-    # Extract the parameters from the old_unet
-    old_unet_params = unfreeze(old_unet_params)
-
-    # Initialize the additional parameters for the new_unet
-    k,k, in_channels, d= old_unet_params['conv_in']['kernel'].shape
-    new_shape = (k, k, in_channels, d)
-
-    if 'conv_in' in old_unet_params.keys():
-        old_conv_in_weight = old_unet_params['conv_in']['kernel']
-        old_conv_in_bias = old_unet_params['conv_in']['bias']
-
-
-        # Initialize the additional weights with Flax defaults 
-        additional_weights = jax.random.normal(jax.random.PRNGKey(0), shape=(new_shape), dtype=weight_dtype)
-
-        # Concatenate the old weights with the new, initialized weights
-        new_conv_in_weight = jnp.concatenate([old_conv_in_weight, additional_weights], axis=2)
-
-        # Update the parameters with the new weights
-        old_unet_params['conv_in']['kernel'] = new_conv_in_weight
-
-    # Freeze the parameters back and load them into the new_unet
-    unet_params = freeze(old_unet_params)
-
-
-
 
     # Optimization
 

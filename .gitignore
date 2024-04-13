@@ -1,8 +1,11 @@
+.gitignore
+
 *foo*
 *fizz*
 
 gatech/
 flax_models/
+modified_*/
 
 # Initially taken from GitHub's Python gitignore file
 
