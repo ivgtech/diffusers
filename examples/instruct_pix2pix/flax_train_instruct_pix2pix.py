@@ -718,6 +718,9 @@ vae_params = jax_utils.replicate(vae_params)
 
 # Train!
 
+
+len_train_dataset = len(train_dataloader) if not args.using_original_dataset else args.original_dataset_length
+
 try:  
     num_update_steps_per_epoch = math.ceil(len(train_dataloader))
 except:
@@ -742,7 +745,7 @@ args.max_train_steps = 15000
 
 logger.info("***** Running training *****")
 
-logger.info(f"  Num examples = {len(train_dataset) if not args.using_original_dataset else args.original_dataset_length}")
+logger.info(f"  Num examples = {len_train_dataset}")
 logger.info(f"  Num Epochs = {args.num_train_epochs}")
 logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
 logger.info(f"  Total train batch size (w. parallel & distributed) = {total_train_batch_size}")
@@ -759,7 +762,7 @@ for epoch in epochs:
 
     train_metrics = []
 
-    steps_per_epoch = len(train_dataset) // total_train_batch_size
+    steps_per_epoch = len_train_dataset // total_train_batch_size
     train_step_progress_bar = tqdm(total=steps_per_epoch, desc="Training...", position=1, leave=False)
     # train
     for batch in train_dataloader:
@@ -797,56 +800,56 @@ for epoch in epochs:
 
 
     
-'''
+# def get_params_to_save(params):
+#     return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
 
-def get_params_to_save(params):
-    return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
+# # Create the pipeline using using the trained modules and save it.
+# if jax.process_index() == 0:
+#     scheduler = FlaxPNDMScheduler(
+#         beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", skip_prk_steps=True
+#     )
+#     safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
+#         "CompVis/stable-diffusion-safety-checker", from_pt=True
+#     )
+#     pipeline = FlaxStableDiffusionPipeline(
+#         text_encoder=text_encoder,
+#         vae=vae,
+#         unet=unet,
+#         tokenizer=tokenizer,
+#         scheduler=scheduler,
+#         safety_checker=safety_checker,
+#         feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
+#     )
 
-# Create the pipeline using using the trained modules and save it.
-if jax.process_index() == 0:
-    scheduler = FlaxPNDMScheduler(
-        beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", skip_prk_steps=True
-    )
-    safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
-        "CompVis/stable-diffusion-safety-checker", from_pt=True
-    )
-    pipeline = FlaxStableDiffusionPipeline(
-        text_encoder=text_encoder,
-        vae=vae,
-        unet=unet,
-        tokenizer=tokenizer,
-        scheduler=scheduler,
-        safety_checker=safety_checker,
-        feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
-    )
+#     pipeline.save_pretrained(
+#         args.output_dir,
+#         params={
+#             "text_encoder": get_params_to_save(text_encoder_params),
+#             "vae": get_params_to_save(vae_params),
+#             "unet": get_params_to_save(state.params),
+#             # "ema": get_params_to_save(state.ema_params),    
+#             # "tx": get_params_to_save(state.tx),
+#             "safety_checker": safety_checker.params,
+#         },
+#     )
 
-    pipeline.save_pretrained(
-        args.output_dir,
-        params={
-            "text_encoder": get_params_to_save(text_encoder_params),
-            "vae": get_params_to_save(vae_params),
-            "unet": get_params_to_save(state.params),
-            # "ema": get_params_to_save(state.ema_params),    
-            # "tx": get_params_to_save(state.tx),
-            "safety_checker": safety_checker.params,
-        },
-    )
+#     # Save the "ema" parameters separately
+#     # as saving additional parameters like "ema" directly through the save_pretrained method is not supported.
+#     ema_params_to_save = get_params_to_save(state.ema_params)
+#     ema_params_path = os.path.join(args.output_dir, "ema_params")
+#     os.makedirs(ema_params_path, exist_ok=True)
+#     ema_params_bytes = to_bytes(ema_params_to_save)
+#     with open(os.path.join(ema_params_path, "ema_params.msgpack"), "wb") as f:
+#         f.write(ema_params_bytes)
 
-    # Save the "ema" parameters separately
-    # as saving additional parameters like "ema" directly through the save_pretrained method is not supported.
-    ema_params_to_save = get_params_to_save(state.ema_params)
-    ema_params_path = os.path.join(args.output_dir, "ema_params")
-    os.makedirs(ema_params_path, exist_ok=True)
-    ema_params_bytes = to_bytes(ema_params_to_save)
-    with open(os.path.join(ema_params_path, "ema_params.msgpack"), "wb") as f:
-        f.write(ema_params_bytes)
 
+# # %%
+
+# #if __name__ == "__main__":
+
+# # main()
+
+
+# # %%
 
 # %%
-
-#if __name__ == "__main__":
-
-# main()
-
-
-'''
