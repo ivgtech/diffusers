@@ -85,6 +85,7 @@ output = pipeline(
     num_inference_steps=50,
     height=512,
     width=512,
+    jit=True, # include for img2img
 ).images
 
 output_images = pipeline.numpy_to_pil(np.asarray(output.reshape((num_samples,) + output.shape[-3:])))
