@@ -14,8 +14,9 @@ from diffusers import FlaxStableDiffusionImg2ImgPipeline
 from diffusers import FlaxStableDiffusionInstructPix2PixPipeline
 from diffusers import FlaxStableDiffusionImg2ImgPipeline
 
-#from jax.experimental.compilation_cache import compilation_cache as cc
-#cc.set_cache_dir("/tmp/sd_cache")
+from jax.experimental.compilation_cache import compilation_cache as cc
+cc.set_cache_dir("/tmp/sd_cache")
+
 
 def download_image(url):
     response = requests.get(url)
@@ -24,28 +25,32 @@ def download_image(url):
 def create_key(seed=0):
     return jax.random.PRNGKey(seed)
 
-# pipeline, params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
-pipeline, params = FlaxStableDiffusionImg2ImgPipeline.from_pretrained(
-    #'../flax_models/instruct-pix2pix',
-    '../flax_models/stable-diffusion-v1-5',
+# pipeline, params = FlaxStableDiffusionImg2ImgPipeline.from_pretrained(
+pipeline, params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
+    '../flax_models/instruct-pix2pix',
+    # '../flax_models/stable-diffusion-v1-5',
     # './instruct-pix2pix-model', 
     dtype=jnp.bfloat16,
     safety_checker=None
 )
 # %%
 
+save_unet_and_ema_params = False # change if both EMA and Unet parameters were saved to disk
 
-ema_params_path = './instruct-pix2pix-model/ema_params/ema_params.msgpack'
+if save_unet_and_ema_params:
+    # If both EMA parameters and Unet parameters are saved to disk, load the EMA parameters from disk, and update the pipeline parameters with them
+    ema_params_path = './instruct-pix2pix-model/ema_params/ema_params.msgpack'
 
-# Load the EMA parameters from disk
-with open(ema_params_path, 'rb') as f:
-    ema_params = from_bytes(params['unet'], f.read()) # template object (here params['unet']) needs to be isomorphic to the target object
+    # Load the EMA parameters from disk
+    with open(ema_params_path, 'rb') as f:
+        ema_params = from_bytes(params['unet'], f.read()) # template object (here params['unet']) needs to be isomorphic to the target object
 
-popped_item = params.pop('unet', None)
+    popped_item = params.pop('unet', None)
 
-# Update the pipeline parameters with the loaded EMA parameters
-params['unet'] = ema_params
+    # Update the pipeline parameters with the loaded EMA parameters
+    params['unet'] = ema_params
 
+# Otherwise, only the EMA parameters are saved to disk under the 'unet' key in the params dictionary
 
 # %%
 

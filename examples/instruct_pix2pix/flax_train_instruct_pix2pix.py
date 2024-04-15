@@ -22,7 +22,7 @@ from flax.training import train_state
 from flax.training.train_state import TrainState
 from flax.training.common_utils import shard
 from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
-from flax.serialization import to_bytes, from_bytes
+from flax import serialization # to_bytes, from_bytes
 
 import torch
 import torch.utils.checkpoint
@@ -56,14 +56,10 @@ args = {
 'pretrained_model_name_or_path': 'runwayml/stable-diffusion-v1-5',
 'revision': 'flax',
 'variant': None,
-# 'dataset_name': 'fusing/instructpix2pix-1000-samples',
-'dataset_name': 'timbrooks/instructpix2pix-clip-filtered',
+'dataset_name': 'fusing/instructpix2pix-1000-samples',
 'dataset_config_name': None,
 'train_data_dir': None,
-# 'original_image_column': 'input_image',
-# 'edited_image_column': 'edited_image',
-# 'edit_prompt_column': 'edit_prompt',
-'original_image_column': 'original_image',
+'original_image_column': 'input_image',
 'edited_image_column': 'edited_image',
 'edit_prompt_column': 'edit_prompt',
 'val_image_url': None,
@@ -80,9 +76,6 @@ args = {
 'train_batch_size': 4,
 'num_train_epochs': 2, #100,
 'max_train_steps': 15000,
-'using_original_dataset': True,
-'original_dataset_length': 313010,
-'original_max_epochs': 2000, # when using the full instruct-pix2-pix dataset
 'gradient_accumulation_steps': 4,
 'gradient_checkpointing': True,
 'learning_rate': 5e-05,
@@ -118,7 +111,11 @@ args = {
 'ema_inv_gamma': 1.0,
 'start_ema_update_after': 100,
 'update_ema_every': 10,
-'save_ema_params': False,
+'save_unet_and_ema_params': False,
+'using_original_dataset': False,
+# 'dataset_name': 'timbrooks/instructpix2pix-clip-filtered',
+# 'original_dataset_length': 313010,
+# 'original_max_epochs': 2000, # when using the full instruct-pix2-pix dataset
 }
 
 class Args:
@@ -127,6 +124,17 @@ class Args:
 
 args = Args(**args)
 
+USING_FULL_DATASET = args.using_original_dataset
+
+if USING_FULL_DATASET:
+    args.dataset_name = "timbrooks/instructpix2pix-clip-filtered"
+    args.original_image_column = 'original_image',
+    args.edited_image_column = 'edited_image',
+    args.edit_prompt_column = 'edit_prompt',
+    args.dataset_length = 313010
+    args.max_epochs = 2000
+else: 
+    args.dataset_length = 1000
 
 DATASET_NAME_MAPPING = {
     "fusing/instructpix2pix-1000-samples": ("input_image", "edit_prompt", "edited_image"),
@@ -477,54 +485,6 @@ class ExtendedTrainState(TrainState, EMAState):
         return self.replace(params=new_params, opt_state=new_opt_state, ema_params=new_ema_params)
 
 
-# Training dataloader
-
-# Creates a JAX generator from a standard PyTorch dataloader
-train_dataloader = NumpyLoader(
-    train_dataset, 
-    batch_size=args.train_batch_size,
-    num_workers= 0
-)
-
-
-# Models and state
-
-weight_dtype = jnp.float32
-if args.mixed_precision == "fp16":
-    weight_dtype = jnp.float16
-elif args.mixed_precision == "bf16":
-    weight_dtype = jnp.bfloat16
-
-# Load models and create wrapper for stable diffusion
-tokenizer = CLIPTokenizer.from_pretrained(
-    args.pretrained_model_name_or_path,
-    from_pt=args.from_pt,
-    revision=args.revision,
-    subfolder="tokenizer",
-)
-text_encoder = FlaxCLIPTextModel.from_pretrained(
-    args.pretrained_model_name_or_path,
-    from_pt=args.from_pt,
-    revision=args.revision,
-    subfolder="text_encoder",
-    dtype=weight_dtype,
-)
-vae, vae_params = FlaxAutoencoderKL.from_pretrained(
-    args.pretrained_model_name_or_path,
-    from_pt=args.from_pt,
-    revision=args.revision,
-    subfolder="vae",
-    dtype=weight_dtype,
-)
-
-# Load the converted unet model
-save_dir = 'modified_unet'
-unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(save_dir, dtype=jnp.bfloat16)
-
-
-
-
-
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
     datefmt="%m/%d/%Y %H:%M:%S",
@@ -540,7 +500,7 @@ if args.seed is not None: set_seed(args.seed)
 
 # Training dataloader
 
-# Creates a JAX generator from a standard PyTorch dataloader
+# Creates a JAX dataloader from a standard PyTorch dataloader
 train_dataloader = NumpyLoader(
     train_dataset, 
     batch_size=args.train_batch_size,
@@ -569,17 +529,21 @@ text_encoder = FlaxCLIPTextModel.from_pretrained(
     subfolder="text_encoder",
     dtype=weight_dtype,
 )
+
+# Load the vae-ft-mse-840000-ema-pruned.ckp
 vae, vae_params = FlaxAutoencoderKL.from_pretrained(
-    args.pretrained_model_name_or_path,
-    from_pt=args.from_pt,
-    revision=args.revision,
+   '../flax_models/stable-diffusion-v1-5', 
     subfolder="vae",
+    revision="flax", # non-EMA weights
     dtype=weight_dtype,
 )
 
 # Load the converted unet model
 save_dir = 'modified_unet'
-unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(save_dir, dtype=jnp.bfloat16)
+unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(
+    save_dir,
+    dtype=jnp.bfloat16
+)
 
 
 # Optimization
@@ -718,19 +682,19 @@ vae_params = jax_utils.replicate(vae_params)
 
 # Train!
 
-
-len_train_dataset = len(train_dataloader) if not args.using_original_dataset else args.original_dataset_length
-
+# Assume streaming data so no len() available
 try:  
+    len_train_dataset = len(train_dataloader)
     num_update_steps_per_epoch = math.ceil(len(train_dataloader))
 except:
-    # If we're using the full dataset, we are also streaming the data, and as 'IterableDataset' objects have no len(), we include it here
-    num_update_steps_per_epoch = args.original_dataset_length
+    # If streaming the data, note that 'IterableDataset' objects have no len(), so set it explicitly
+    len_train_dataset = args.dataset_length
+    num_update_steps_per_epoch = args.dataset_length
 
 # Scheduler and math around the number of training steps.
 if args.using_original_dataset:
-    num_update_steps_per_epoch = args.original_dataset_length
-    args.num_train_epochs = args.original_max_epochs
+    num_update_steps_per_epoch = args.dataset_length
+    args.num_train_epochs = args.max_epochs
     args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch 
 else: 
     if args.max_train_steps is None:
@@ -800,56 +764,64 @@ for epoch in epochs:
 
 
     
-# def get_params_to_save(params):
-#     return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
+def get_params_to_save(params):
+    return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
 
-# # Create the pipeline using using the trained modules and save it.
-# if jax.process_index() == 0:
-#     scheduler = FlaxPNDMScheduler(
-#         beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", skip_prk_steps=True
-#     )
-#     safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
-#         "CompVis/stable-diffusion-safety-checker", from_pt=True
-#     )
-#     pipeline = FlaxStableDiffusionPipeline(
-#         text_encoder=text_encoder,
-#         vae=vae,
-#         unet=unet,
-#         tokenizer=tokenizer,
-#         scheduler=scheduler,
-#         safety_checker=safety_checker,
-#         feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
-#     )
+# Create the pipeline using using the trained modules and save it.
+if jax.process_index() == 0:
+    scheduler = FlaxPNDMScheduler(
+        beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", skip_prk_steps=True
+    )
+    safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
+        "CompVis/stable-diffusion-safety-checker", from_pt=True
+    )
+    pipeline = FlaxStableDiffusionPipeline(
+        text_encoder=text_encoder,
+        vae=vae,
+        unet=unet,
+        tokenizer=tokenizer,
+        scheduler=scheduler,
+        safety_checker=safety_checker,
+        feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
+    )
 
-#     pipeline.save_pretrained(
-#         args.output_dir,
-#         params={
-#             "text_encoder": get_params_to_save(text_encoder_params),
-#             "vae": get_params_to_save(vae_params),
-#             "unet": get_params_to_save(state.params),
-#             # "ema": get_params_to_save(state.ema_params),    
-#             # "tx": get_params_to_save(state.tx),
-#             "safety_checker": safety_checker.params,
-#         },
-#     )
+    args.save_unet_and_ema_params = False
 
-#     # Save the "ema" parameters separately
-#     # as saving additional parameters like "ema" directly through the save_pretrained method is not supported.
-#     ema_params_to_save = get_params_to_save(state.ema_params)
-#     ema_params_path = os.path.join(args.output_dir, "ema_params")
-#     os.makedirs(ema_params_path, exist_ok=True)
-#     ema_params_bytes = to_bytes(ema_params_to_save)
-#     with open(os.path.join(ema_params_path, "ema_params.msgpack"), "wb") as f:
-#         f.write(ema_params_bytes)
+    if args.save_unet_and_ema_params:
+        logger.info("Saving both UNet and EMA parameters to disk.")
+        # "ema" parameters need to be saved separately as saving additional parameters through the save_pretrained method is not supported.
+        ema_params_to_save = get_params_to_save(state.ema_params)
+        ema_params_path = os.path.join(args.output_dir, "ema_params")
+        os.makedirs(ema_params_path, exist_ok=True)
+        ema_params_bytes = serialization.to_bytes(ema_params_to_save)
+        with open(os.path.join(ema_params_path, "ema_params.msgpack"), "wb") as f:
+            f.write(ema_params_bytes)
+
+        unet_params = get_params_to_save(state.params)
+    else:
+        # Only save the ema_params
+        logger.info("Saving EMA parameters under the 'unet' key.")
+        unet_params = get_params_to_save(state.ema_params)
 
 
-# # %%
-
-# #if __name__ == "__main__":
-
-# # main()
-
-
-# # %%
+    pipeline.save_pretrained(
+        args.output_dir,
+        params={
+            "text_encoder": get_params_to_save(text_encoder_params),
+            "vae": get_params_to_save(vae_params),
+            "unet": get_params_to_save(unet_params),
+            # "ema": get_params_to_save(state.ema_params),    
+            # "tx": get_params_to_save(state.tx),
+            "safety_checker": safety_checker.params,
+        },
+    )
 
 # %%
+
+#if __name__ == "__main__":
+
+# main()
+
+
+# %%
+

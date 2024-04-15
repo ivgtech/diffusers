@@ -57,6 +57,8 @@ from transformers import (
     FlaxCLIPTextModel
     )
 from diffusers import (
+    AutoencoderKL,
+    UNet2DConditionModel,
     FlaxAutoencoderKL,
     FlaxDDPMScheduler,
     FlaxDDIMScheduler,
