@@ -49,16 +49,6 @@ check_min_version("0.28.0.dev0")
 logger = logging.getLogger(__name__)
 
 
-DATASET_NAME_MAPPING = {
-    "fusing/instructpix2pix-1000-samples": ("input_image", "edit_prompt", "edited_image"),
-}
-WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
-
-
-# new imports
-from jax_dataloader import NumpyLoader, train_dataset, show_batch, batch_to_pil_plus_text
-
-
 
 # convert the namespace to a dictionary
 
@@ -70,7 +60,10 @@ args = {
 'dataset_name': 'timbrooks/instructpix2pix-clip-filtered',
 'dataset_config_name': None,
 'train_data_dir': None,
-'original_image_column': 'input_image',
+# 'original_image_column': 'input_image',
+# 'edited_image_column': 'edited_image',
+# 'edit_prompt_column': 'edit_prompt',
+'original_image_column': 'original_image',
 'edited_image_column': 'edited_image',
 'edit_prompt_column': 'edit_prompt',
 'val_image_url': None,
@@ -87,6 +80,9 @@ args = {
 'train_batch_size': 4,
 'num_train_epochs': 2, #100,
 'max_train_steps': 15000,
+'using_original_dataset': True,
+'original_dataset_length': 313010,
+'original_max_epochs': 2000, # when using the full instruct-pix2-pix dataset
 'gradient_accumulation_steps': 4,
 'gradient_checkpointing': True,
 'learning_rate': 5e-05,
@@ -132,6 +128,15 @@ class Args:
 args = Args(**args)
 
 
+DATASET_NAME_MAPPING = {
+    "fusing/instructpix2pix-1000-samples": ("input_image", "edit_prompt", "edited_image"),
+}
+WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
+
+# new imports
+from jax_dataloader import NumpyLoader, train_dataset, show_batch, batch_to_pil_plus_text
+
+
 import PIL
 import requests
 
@@ -166,6 +171,7 @@ if args.dataset_name is not None:
         args.dataset_name,
         args.dataset_config_name,
         cache_dir=args.cache_dir,
+        streaming=True,
     )
 else:
     data_files = {}
@@ -175,6 +181,7 @@ else:
         "imagefolder",
         data_files=data_files,
         cache_dir=args.cache_dir,
+        streaming=True,
     )
     # See more about loading custom images at
     # https://huggingface.co/docs/datasets/main/en/image_load#imagefolder
@@ -264,7 +271,10 @@ if args.max_train_samples is not None:
     dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
 
 # Set the training transforms
-train_dataset = dataset["train"].with_transform(preprocess_train)
+# train_dataset = dataset["train"].with_transform(preprocess_train)
+
+train_dataset = dataset["train"].map(preprocess_train, batched=True, batch_size=args.train_batch_size)
+
 
 def collate_fn(examples):
     original_pixel_values = torch.stack([example["original_pixel_values"] for example in examples])
@@ -279,15 +289,15 @@ def collate_fn(examples):
     }
 
 
+shuffled_dataset = train_dataset.shuffle(seed=42, buffer_size=1_000)
+
 # DataLoaders creation:
 train_dataloader_torch = torch.utils.data.DataLoader(
-    train_dataset,
-    shuffle=True,
+    shuffled_dataset,
     collate_fn=collate_fn,
     batch_size=args.train_batch_size,
     num_workers=args.dataloader_num_workers,
 )
-
 
 def torch_to_numpy(batch):
     return {k: v.numpy() for k, v in batch.items()}
@@ -476,7 +486,6 @@ train_dataloader = NumpyLoader(
     num_workers= 0
 )
 
-# %%
 
 # Models and state
 
@@ -708,18 +717,32 @@ text_encoder_params = jax_utils.replicate(text_encoder.params)
 vae_params = jax_utils.replicate(vae_params)
 
 # Train!
-num_update_steps_per_epoch = math.ceil(len(train_dataloader))
+
+try:  
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader))
+except:
+    # If we're using the full dataset, we are also streaming the data, and as 'IterableDataset' objects have no len(), we include it here
+    num_update_steps_per_epoch = args.original_dataset_length
 
 # Scheduler and math around the number of training steps.
-if args.max_train_steps is None:
-    args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch # 60 * 250 = 15000
+if args.using_original_dataset:
+    num_update_steps_per_epoch = args.original_dataset_length
+    args.num_train_epochs = args.original_max_epochs
+    args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch 
+else: 
+    if args.max_train_steps is None:
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch # 60 * 250 = 15000
 
-args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch) # 15000 / 250 = 60
+    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch) # 15000 / 250 = 60
 
-# args.num_train_epochs = 2  # NOTE: TESTING ONLY: SET EPOCHS TO 2
+args.num_train_epochs = 2  # NOTE: TESTING ONLY: SET EPOCHS TO 2
+args.max_train_steps = 15000
+
+# %% 
 
 logger.info("***** Running training *****")
-logger.info(f"  Num examples = {len(train_dataset)}")
+
+logger.info(f"  Num examples = {len(train_dataset) if not args.using_original_dataset else args.original_dataset_length}")
 logger.info(f"  Num Epochs = {args.num_train_epochs}")
 logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
 logger.info(f"  Total train batch size (w. parallel & distributed) = {total_train_batch_size}")
@@ -774,6 +797,7 @@ for epoch in epochs:
 
 
     
+'''
 
 def get_params_to_save(params):
     return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
@@ -824,3 +848,5 @@ if jax.process_index() == 0:
 
 # main()
 
+
+'''
