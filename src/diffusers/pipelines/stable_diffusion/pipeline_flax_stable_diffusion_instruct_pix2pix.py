@@ -368,8 +368,14 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
             latents_input = jnp.concatenate([latents_input, image_latents], axis=1)
 
             # predict the noise residual
+
+            # if ema paramas are available, use them
+            if "ema" in params:
+                unet_params = params["ema"]
+            else:
+                unet_params = params["unet"]
             noise_pred = self.unet.apply(
-                {"params": params["unet"]},
+                {"params": unet_params},
                 jnp.array(latents_input),
                 jnp.array(timestep, dtype=jnp.int32),
                 encoder_hidden_states=context,

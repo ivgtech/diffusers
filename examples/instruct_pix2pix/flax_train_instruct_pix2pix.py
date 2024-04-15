@@ -7,25 +7,31 @@ import math
 import os
 import random
 from pathlib import Path
+from tqdm.auto import tqdm
+from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import torch
-import torch.utils.checkpoint
-import transformers
-from datasets import load_dataset
+
 from flax import jax_utils
+from flax import core, struct
+from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT
 from flax.training import train_state
 from flax.training.train_state import TrainState
-
 from flax.training.common_utils import shard
 from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
-from huggingface_hub import create_repo, upload_folder
+from flax.serialization import to_bytes, from_bytes
+
+import torch
+import torch.utils.checkpoint
 from torchvision import transforms
-from tqdm.auto import tqdm
+
+import transformers
 from transformers import CLIPImageProcessor, CLIPTokenizer, FlaxCLIPTextModel, set_seed
+from huggingface_hub import create_repo, upload_folder
+from datasets import load_dataset
 
 from diffusers import (
     FlaxAutoencoderKL,
@@ -60,7 +66,8 @@ args = {
 'pretrained_model_name_or_path': 'runwayml/stable-diffusion-v1-5',
 'revision': 'flax',
 'variant': None,
-'dataset_name': 'fusing/instructpix2pix-1000-samples',
+# 'dataset_name': 'fusing/instructpix2pix-1000-samples',
+'dataset_name': 'timbrooks/instructpix2pix-clip-filtered',
 'dataset_config_name': None,
 'train_data_dir': None,
 'original_image_column': 'input_image',
@@ -78,7 +85,7 @@ args = {
 'center_crop': False,
 'random_flip': True,
 'train_batch_size': 4,
-'num_train_epochs': 100,
+'num_train_epochs': 2, #100,
 'max_train_steps': 15000,
 'gradient_accumulation_steps': 4,
 'gradient_checkpointing': True,
@@ -115,6 +122,7 @@ args = {
 'ema_inv_gamma': 1.0,
 'start_ema_update_after': 100,
 'update_ema_every': 10,
+'save_ema_params': False,
 }
 
 class Args:
@@ -292,13 +300,6 @@ class JAXDataLoader:
             # Convert PyTorch tensors in the batch to NumPy arrays
             yield torch_to_numpy(batch)
 
-
-
-
-
-
-
-
 # Helper functions
 
 def retrieve_latents_jax(image, vae, vae_params, key=None, sample_mode="sample"):
@@ -317,7 +318,6 @@ def retrieve_latents_jax(image, vae, vae_params, key=None, sample_mode="sample")
         return encoder_output.latents
     else:
         raise ValueError(f"Invalid sample_mode: {sample_mode}")
-
 
 def NHWC_to_NCHW(tensor):
     return jnp.einsum("ijkl->iljk", tensor)
@@ -376,22 +376,20 @@ def get_nparams(params: FrozenDict) -> int:
             nparams += params[item].size
     return nparams
 
-from typing import Any, Callable
-import optax
-from flax import core, struct
-from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT
+
+
 
 class EMAState(struct.PyTreeNode):
     """
-    Extends the TrainState to include exponential moving average (EMA) of the model parameters.
-    
+    Adds EMA parameters storage to the state.
+
     Attributes:
         ema_params: A FrozenDict containing the EMA of the parameters.
     """
     ema_params: core.FrozenDict[str, Any] = struct.field(pytree_node=True)
 
 
-class ExtendedTrainState(TrainState, EMAState):
+class BasicExtendedTrainState(TrainState, EMAState):
     """
     A simple train state for the common case with a single Optax optimizer that also tracks
     the exponential moving average (EMA) of the model parameters.
@@ -423,8 +421,113 @@ class ExtendedTrainState(TrainState, EMAState):
         return self.replace(params=new_params, opt_state=new_opt_state, ema_params=new_ema_params)
 
 
+class ExtendedTrainState(TrainState, EMAState):
+    """
+    Extended train state to include EMA parameters and dynamic EMA updates.
+    """
+    def apply_gradients(self, grads: core.FrozenDict[str, Any], steps: int, max_ema_decay: float = 0.999,
+                        min_ema_decay: float = 0.5, ema_decay_power: float = 0.6666666, ema_inv_gamma: float = 1.0,
+                        start_ema_update_after: int = 100, update_ema_every: int = 10) -> "ExtendedTrainState":
+        """
+        Apply gradients and update EMA parameters dynamically based on training steps.
+
+        Args:
+            grads: Gradients to apply.
+            steps: Current step in training used to compute the EMA decay rate dynamically.
+            max_ema_decay: Maximum decay rate.
+            min_ema_decay: Minimum decay rate.
+            ema_decay_power: Decay power factor.
+            ema_inv_gamma: Inverse gamma for decay calculation.
+            start_ema_update_after: Number of steps after which EMA updates start.
+            update_ema_every: Frequency of EMA updates in number of steps.
+
+        Returns:
+            Updated `ExtendedTrainState`.
+        """
+        # Apply the usual gradients to update parameters
+        updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
+        new_params = optax.apply_updates(self.params, updates)
+
+        # Update EMA parameters using the dynamic decay rate calculation
+        def calculate_decay():
+            decay = 1.0 - (1.0 + (steps / ema_inv_gamma)) ** (-ema_decay_power)
+            return jnp.clip(decay, min_ema_decay, max_ema_decay)
+
+        if steps >= start_ema_update_after and steps % update_ema_every == 0:
+            decay = calculate_decay()
+            decay_avg = 1.0 - decay
+            new_ema_params = jax.tree_util.tree_map(
+                lambda ema, p_new: decay_avg * ema + decay * p_new,
+                self.ema_params,
+                new_params,
+            )
+        else:
+            new_ema_params = self.ema_params
+
+        return self.replace(params=new_params, opt_state=new_opt_state, ema_params=new_ema_params)
 
 
+# Training dataloader
+
+# Creates a JAX generator from a standard PyTorch dataloader
+train_dataloader = NumpyLoader(
+    train_dataset, 
+    batch_size=args.train_batch_size,
+    num_workers= 0
+)
+
+# %%
+
+# Models and state
+
+weight_dtype = jnp.float32
+if args.mixed_precision == "fp16":
+    weight_dtype = jnp.float16
+elif args.mixed_precision == "bf16":
+    weight_dtype = jnp.bfloat16
+
+# Load models and create wrapper for stable diffusion
+tokenizer = CLIPTokenizer.from_pretrained(
+    args.pretrained_model_name_or_path,
+    from_pt=args.from_pt,
+    revision=args.revision,
+    subfolder="tokenizer",
+)
+text_encoder = FlaxCLIPTextModel.from_pretrained(
+    args.pretrained_model_name_or_path,
+    from_pt=args.from_pt,
+    revision=args.revision,
+    subfolder="text_encoder",
+    dtype=weight_dtype,
+)
+vae, vae_params = FlaxAutoencoderKL.from_pretrained(
+    args.pretrained_model_name_or_path,
+    from_pt=args.from_pt,
+    revision=args.revision,
+    subfolder="vae",
+    dtype=weight_dtype,
+)
+
+# Load the converted unet model
+save_dir = 'modified_unet'
+unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(save_dir, dtype=jnp.bfloat16)
+
+
+
+
+
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+    level=logging.INFO,)
+# Setup logging, we only want one process per machine to log things on the screen.
+logger.setLevel(logging.INFO if jax.process_index() == 0 else logging.ERROR)
+if jax.process_index() == 0:
+    transformers.utils.logging.set_verbosity_info()
+else:
+    transformers.utils.logging.set_verbosity_error()
+
+if args.seed is not None: set_seed(args.seed)
 
 # Training dataloader
 
@@ -470,300 +573,254 @@ save_dir = 'modified_unet'
 unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(save_dir, dtype=jnp.bfloat16)
 
 
+# Optimization
+
+total_train_batch_size = args.train_batch_size * jax.local_device_count()
+if args.scale_lr:
+    args.learning_rate = args.learning_rate * total_train_batch_size
+
+constant_scheduler = optax.constant_schedule(args.learning_rate)
+
+adamw = optax.adamw(
+    learning_rate=constant_scheduler,
+    b1=args.adam_beta1,
+    b2=args.adam_beta2,
+    eps=args.adam_epsilon,
+    weight_decay=args.adam_weight_decay,
+)
+
+optimizer = optax.chain(
+    optax.clip_by_global_norm(args.max_grad_norm),
+    adamw,
+)
+
+print("Number of unet parameters: ", get_nparams(unet_params))
+
+# Initialize EMA params with original model params
+ema_params = copy.deepcopy(unet_params)
+print("Number of EMA parameters: ", get_nparams(ema_params))
+
+# Prepare optimizer and state, including EMA parameters
+state = BasicExtendedTrainState.create(apply_fn=unet.__call__, params=unet_params, ema_params=ema_params, tx=optimizer)
+# state = TrainState.create(apply_fn=unet.__call__, params=unet_params, tx=optimizer)
+
+noise_scheduler = FlaxDDPMScheduler(
+    beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000
+)
+noise_scheduler_state = noise_scheduler.create_state()
+
+# Initialize our training
+rng = jax.random.PRNGKey(args.seed)
+train_rngs = jax.random.split(rng, jax.local_device_count())
+
+# print("Starting training...")
+# return 0
+
+def train_step(state, text_encoder_params, vae_params, batch, train_rng, global_step):
+    dropout_rng, sample_rng, new_train_rng = jax.random.split(train_rng, 3)
+
+    print('global_step: ', global_step)
+
+    def compute_loss(params):
+
+        print('compute_loss global_step: ', global_step)
+        # Convert images to latent space
+        vae_outputs = vae.apply(
+            {"params": vae_params}, batch["edited_pixel_values"], deterministic=True, method=vae.encode
+        )
+        latents = vae_outputs.latent_dist.sample(sample_rng)
+        # (NHWC) -> (NCHW)
+        latents = jnp.einsum("ijkl->iljk", latents) * vae.config.scaling_factor
+        noise_rng, timestep_rng = jax.random.split(sample_rng)
+
+        # Sample noise that we'll add to the latents
+        noise = jax.random.normal(noise_rng, latents.shape)
+
+        # Sample a random timestep for each image
+        bsz = latents.shape[0]
+        timesteps = jax.random.randint(
+            timestep_rng,
+            (bsz,),
+            0,
+            noise_scheduler.config.num_train_timesteps,
+        )
+        # Add noise to the latents according to the noise magnitude at each timestep
+        # (this is the forward diffusion process)
+        noisy_latents = noise_scheduler.add_noise(noise_scheduler_state, latents, noise, timesteps)
+
+        # Get the text embedding for conditioning
+        encoder_hidden_states = text_encoder(
+            batch["input_ids"],
+            params=text_encoder_params,
+            train=False,
+        )[0]
+
+        # Get the additional image embedding for conditioning.
+        # Instead of getting a diagonal Gaussian here, we simply take the mode.
+        vae_image_outputs = vae.apply(
+            {"params": vae_params}, batch["original_pixel_values"], deterministic=True, method=vae.encode
+        )
+        original_image_embeds = vae_image_outputs.latent_dist.mode()
+        # (NHWC) -> (NCHW)
+        original_image_embeds = jnp.einsum("ijkl->iljk", original_image_embeds)
+
+        # TODO: Implement conditioning dropout
+
+        # Concatenate the `original_image_embeds` with the `noisy_latents`.
+        concatenated_noisy_latents = jnp.concatenate([noisy_latents, original_image_embeds], axis=1)
+
+        # Predict the noise residual and compute loss
+        model_pred = unet.apply(
+            {"params": params}, concatenated_noisy_latents, timesteps, encoder_hidden_states, train=True
+        ).sample
+
+        # Get the target for loss depending on the prediction type
+        if noise_scheduler.config.prediction_type == "epsilon":
+            target = noise
+        elif noise_scheduler.config.prediction_type == "v_prediction":
+            target = noise_scheduler.get_velocity(noise_scheduler_state, latents, noise, timesteps)
+        else:
+            raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+
+        loss = (target - model_pred) ** 2
+        loss = loss.mean()
+
+        return loss
+
+    grad_fn = jax.value_and_grad(compute_loss)
+    loss, grad = grad_fn(state.params)
+    grad = jax.lax.pmean(grad, "batch")
+
+    new_state = state.apply_gradients(grads=grad)
+
+    metrics = {"loss": loss}
+    metrics = jax.lax.pmean(metrics, axis_name="batch")
+
+    return new_state, metrics, new_train_rng
+
+
+# Create parallel version of the train step
+p_train_step = jax.pmap(train_step, "batch", donate_argnums=(0,))
+
+# Replicate the train state on each device
+state = jax_utils.replicate(state)
+text_encoder_params = jax_utils.replicate(text_encoder.params)
+vae_params = jax_utils.replicate(vae_params)
+
+# Train!
+num_update_steps_per_epoch = math.ceil(len(train_dataloader))
+
+# Scheduler and math around the number of training steps.
+if args.max_train_steps is None:
+    args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch # 60 * 250 = 15000
+
+args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch) # 15000 / 250 = 60
+
+# args.num_train_epochs = 2  # NOTE: TESTING ONLY: SET EPOCHS TO 2
+
+logger.info("***** Running training *****")
+logger.info(f"  Num examples = {len(train_dataset)}")
+logger.info(f"  Num Epochs = {args.num_train_epochs}")
+logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
+logger.info(f"  Total train batch size (w. parallel & distributed) = {total_train_batch_size}")
+logger.info(f"  Total optimization steps = {args.max_train_steps}")
+
+global_step = 0
+
+
 
 # %% 
+epochs = tqdm(range(args.num_train_epochs), desc="Epoch ... ", position=0)
+for epoch in epochs:
+    # ======================== Training ================================
 
-def main():
+    train_metrics = []
 
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,)
-    # Setup logging, we only want one process per machine to log things on the screen.
-    logger.setLevel(logging.INFO if jax.process_index() == 0 else logging.ERROR)
-    if jax.process_index() == 0:
-        transformers.utils.logging.set_verbosity_info()
-    else:
-        transformers.utils.logging.set_verbosity_error()
+    steps_per_epoch = len(train_dataset) // total_train_batch_size
+    train_step_progress_bar = tqdm(total=steps_per_epoch, desc="Training...", position=1, leave=False)
+    # train
+    for batch in train_dataloader:
+        batch = shard(batch)
 
-    if args.seed is not None: set_seed(args.seed)
+        # Replicate global_step only for passing to the pmapped function
+        replicated_global_step = jax.device_put_replicated(global_step, jax.local_devices())
 
-    # Training dataloader
-
-    # Creates a JAX generator from a standard PyTorch dataloader
-    train_dataloader = NumpyLoader(
-        train_dataset, 
-        batch_size=args.train_batch_size,
-        num_workers= 0
-    )
-
-    # Models and state
-
-    weight_dtype = jnp.float32
-    if args.mixed_precision == "fp16":
-        weight_dtype = jnp.float16
-    elif args.mixed_precision == "bf16":
-        weight_dtype = jnp.bfloat16
-
-    # Load models and create wrapper for stable diffusion
-    tokenizer = CLIPTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
-        from_pt=args.from_pt,
-        revision=args.revision,
-        subfolder="tokenizer",
-    )
-    text_encoder = FlaxCLIPTextModel.from_pretrained(
-        args.pretrained_model_name_or_path,
-        from_pt=args.from_pt,
-        revision=args.revision,
-        subfolder="text_encoder",
-        dtype=weight_dtype,
-    )
-    vae, vae_params = FlaxAutoencoderKL.from_pretrained(
-        args.pretrained_model_name_or_path,
-        from_pt=args.from_pt,
-        revision=args.revision,
-        subfolder="vae",
-        dtype=weight_dtype,
-    )
-
-    # Load the converted unet model
-    save_dir = 'modified_unet'
-    unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(save_dir, dtype=jnp.bfloat16)
-
-
-
-
-
-
-    # Optimization
-
-    total_train_batch_size = args.train_batch_size * jax.local_device_count()
-    if args.scale_lr:
-        args.learning_rate = args.learning_rate * total_train_batch_size
-
-    constant_scheduler = optax.constant_schedule(args.learning_rate)
-
-    adamw = optax.adamw(
-        learning_rate=constant_scheduler,
-        b1=args.adam_beta1,
-        b2=args.adam_beta2,
-        eps=args.adam_epsilon,
-        weight_decay=args.adam_weight_decay,
-    )
-
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(args.max_grad_norm),
-        adamw,
-    )
-
-    print("Number of unet parameters: ", get_nparams(unet_params))
-
-    # Initialize EMA params with original model params
-    ema_params = copy.deepcopy(unet_params)
-    print("Number of EMA parameters: ", get_nparams(ema_params))
-
-    # Prepare optimizer and state, including EMA parameters
-    state = ExtendedTrainState.create(apply_fn=unet.__call__, params=unet_params, ema_params=ema_params, tx=optimizer)
-
-    noise_scheduler = FlaxDDPMScheduler(
-        beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000
-    )
-    noise_scheduler_state = noise_scheduler.create_state()
-
-    # Initialize our training
-    rng = jax.random.PRNGKey(args.seed)
-    train_rngs = jax.random.split(rng, jax.local_device_count())
-
-    # print("Starting training...")
-    # return 0
-    
-    def train_step(state, text_encoder_params, vae_params, batch, train_rng):
-        dropout_rng, sample_rng, new_train_rng = jax.random.split(train_rng, 3)
-
-        def compute_loss(params):
-            # Convert images to latent space
-            vae_outputs = vae.apply(
-                {"params": vae_params}, batch["edited_pixel_values"], deterministic=True, method=vae.encode
-            )
-            latents = vae_outputs.latent_dist.sample(sample_rng)
-            # (NHWC) -> (NCHW)
-            latents = jnp.einsum("ijkl->iljk", latents) * vae.config.scaling_factor
-            noise_rng, timestep_rng = jax.random.split(sample_rng)
-
-            # Sample noise that we'll add to the latents
-            noise = jax.random.normal(noise_rng, latents.shape)
-
-            # Sample a random timestep for each image
-            bsz = latents.shape[0]
-            timesteps = jax.random.randint(
-                timestep_rng,
-                (bsz,),
-                0,
-                noise_scheduler.config.num_train_timesteps,
-            )
-            # Add noise to the latents according to the noise magnitude at each timestep
-            # (this is the forward diffusion process)
-            noisy_latents = noise_scheduler.add_noise(noise_scheduler_state, latents, noise, timesteps)
-
-            # Get the text embedding for conditioning
-            encoder_hidden_states = text_encoder(
-                batch["input_ids"],
-                params=text_encoder_params,
-                train=False,
-            )[0]
-
-            # Get the additional image embedding for conditioning.
-            # Instead of getting a diagonal Gaussian here, we simply take the mode.
-            vae_image_outputs = vae.apply(
-                {"params": vae_params}, batch["original_pixel_values"], deterministic=True, method=vae.encode
-            )
-            original_image_embeds = vae_image_outputs.latent_dist.mode()
-            # (NHWC) -> (NCHW)
-            original_image_embeds = jnp.einsum("ijkl->iljk", original_image_embeds)
-
-            # TODO: Implement conditioning dropout
-
-            # Concatenate the `original_image_embeds` with the `noisy_latents`.
-            concatenated_noisy_latents = jnp.concatenate([noisy_latents, original_image_embeds], axis=1)
-
-            # Predict the noise residual and compute loss
-            model_pred = unet.apply(
-                {"params": params}, concatenated_noisy_latents, timesteps, encoder_hidden_states, train=True
-            ).sample
-
-            # Get the target for loss depending on the prediction type
-            if noise_scheduler.config.prediction_type == "epsilon":
-                target = noise
-            elif noise_scheduler.config.prediction_type == "v_prediction":
-                target = noise_scheduler.get_velocity(noise_scheduler_state, latents, noise, timesteps)
-            else:
-                raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
-
-            loss = (target - model_pred) ** 2
-            loss = loss.mean()
-
-            return loss
-
-        grad_fn = jax.value_and_grad(compute_loss)
-        loss, grad = grad_fn(state.params)
-        grad = jax.lax.pmean(grad, "batch")
-
-        new_state = state.apply_gradients(grads=grad)
-
-        metrics = {"loss": loss}
-        metrics = jax.lax.pmean(metrics, axis_name="batch")
-
-        return new_state, metrics, new_train_rng
-
-
-    # Create parallel version of the train step
-    p_train_step = jax.pmap(train_step, "batch", donate_argnums=(0,))
-
-    # Replicate the train state on each device
-    state = jax_utils.replicate(state)
-    text_encoder_params = jax_utils.replicate(text_encoder.params)
-    vae_params = jax_utils.replicate(vae_params)
-
-    # Train!
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader))
-
-    # Scheduler and math around the number of training steps.
-    if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-
-    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-
-    logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel & distributed) = {total_train_batch_size}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
-
-    global_step = 0
-
-
-    epochs = tqdm(range(args.num_train_epochs), desc="Epoch ... ", position=0)
-    for epoch in epochs:
-        # ======================== Training ================================
-
-        train_metrics = []
-
-        steps_per_epoch = len(train_dataset) // total_train_batch_size
-        train_step_progress_bar = tqdm(total=steps_per_epoch, desc="Training...", position=1, leave=False)
-        # train
-        for batch in train_dataloader:
-            batch = shard(batch)
-            state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, batch, train_rngs)
-            train_metrics.append(train_metric)
-
-            # Update EMA parameters
-            # state.ema_params = ema_update(
-            #     state.params,
-            #     state.ema_params,
-            #     global_step,
-            #     args.max_ema_decay,
-            #     args.min_ema_decay,
-            #     args.ema_decay_power,
-            #     args.ema_inv_gamma,
-            #     args.start_ema_update_after,
-            #     args.update_ema_every,
-            # )
-
-            train_step_progress_bar.update(1)
-
-            global_step += 1
-            if global_step >= args.max_train_steps:
-                break
-
-        train_metric = jax_utils.unreplicate(train_metric)
-
-        train_step_progress_bar.close()
-        epochs.write(f"Epoch... ({epoch + 1}/{args.num_train_epochs} | Loss: {train_metric['loss']})")
-
-
+        state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, batch, train_rngs, replicated_global_step)
+        train_metrics.append(train_metric)
         
+        # Update EMA parameters
+        # state.ema_params = ema_update(
+        #     state.params,
+        #     state.ema_params,
+        #     global_step,
+        #     args.max_ema_decay,
+        #     args.min_ema_decay,
+        #     args.ema_decay_power,
+        #     args.ema_inv_gamma,
+        #     args.start_ema_update_after,
+        #     args.update_ema_every,
+        # )
+
+        train_step_progress_bar.update(1)
+
+        global_step += 1  # Increment global_step as a scalar
+        if global_step >= args.max_train_steps:
+            break
+
+    train_metric = jax_utils.unreplicate(train_metric)
+
+    train_step_progress_bar.close()
+    epochs.write(f"Epoch... ({epoch + 1}/{args.num_train_epochs} | Loss: {train_metric['loss']})")
 
 
-    def get_params_to_save(params):
-        return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
+    
 
-    # Create the pipeline using using the trained modules and save it.
-    if jax.process_index() == 0:
-        scheduler = FlaxPNDMScheduler(
-            beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", skip_prk_steps=True
-        )
-        safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
-            "CompVis/stable-diffusion-safety-checker", from_pt=True
-        )
-        pipeline = FlaxStableDiffusionPipeline(
-            text_encoder=text_encoder,
-            vae=vae,
-            unet=unet,
-            tokenizer=tokenizer,
-            scheduler=scheduler,
-            safety_checker=safety_checker,
-            feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
-        )
+def get_params_to_save(params):
+    return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
 
-        pipeline.save_pretrained(
-            args.output_dir,
-            params={
-                "text_encoder": get_params_to_save(text_encoder_params),
-                "vae": get_params_to_save(vae_params),
-                "unet": get_params_to_save(state.params),
-                "ema": get_params_to_save(state.ema_params),    
-                # "tx": get_params_to_save(state.tx),
-                "safety_checker": safety_checker.params,
-            },
-        )
+# Create the pipeline using using the trained modules and save it.
+if jax.process_index() == 0:
+    scheduler = FlaxPNDMScheduler(
+        beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", skip_prk_steps=True
+    )
+    safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
+        "CompVis/stable-diffusion-safety-checker", from_pt=True
+    )
+    pipeline = FlaxStableDiffusionPipeline(
+        text_encoder=text_encoder,
+        vae=vae,
+        unet=unet,
+        tokenizer=tokenizer,
+        scheduler=scheduler,
+        safety_checker=safety_checker,
+        feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
+    )
+
+    pipeline.save_pretrained(
+        args.output_dir,
+        params={
+            "text_encoder": get_params_to_save(text_encoder_params),
+            "vae": get_params_to_save(vae_params),
+            "unet": get_params_to_save(state.params),
+            # "ema": get_params_to_save(state.ema_params),    
+            # "tx": get_params_to_save(state.tx),
+            "safety_checker": safety_checker.params,
+        },
+    )
+
+    # Save the "ema" parameters separately
+    # as saving additional parameters like "ema" directly through the save_pretrained method is not supported.
+    ema_params_to_save = get_params_to_save(state.ema_params)
+    ema_params_path = os.path.join(args.output_dir, "ema_params")
+    os.makedirs(ema_params_path, exist_ok=True)
+    ema_params_bytes = to_bytes(ema_params_to_save)
+    with open(os.path.join(ema_params_path, "ema_params.msgpack"), "wb") as f:
+        f.write(ema_params_bytes)
 
 
 # %%
 
-if __name__ == "__main__":
-    main()
+#if __name__ == "__main__":
 
+# main()
 
-# %%
