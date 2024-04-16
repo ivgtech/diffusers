@@ -482,9 +482,11 @@ text_encoder = FlaxCLIPTextModel.from_pretrained(
 
 # Load the vae-ft-mse-840000-ema-pruned.ckp
 vae, vae_params = FlaxAutoencoderKL.from_pretrained(
-    '../flax_models/stable-diffusion-v1-5', 
+    #'../flax_models/stable-diffusion-v1-5', 
+    args.pretrained_model_name_or_path,
     subfolder="vae",
-    revision="flax", # non-EMA weights
+    #revision="flax", # non-EMA weights
+    revision=args.revision,
     dtype=weight_dtype,
 )
 
