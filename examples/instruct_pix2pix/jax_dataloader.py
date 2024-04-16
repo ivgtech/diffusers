@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 from pickle import UnpicklingError
 from typing import Any, Dict, Union
 
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -261,12 +260,17 @@ def collate_fn(examples):
         "input_ids": input_ids,
     }
 
-import numpy as np
 
 def collate_fn_jax(examples):
-    original_pixel_values = np.stack([example["original_pixel_values"] for example in examples]).astype(np.float32)
-    edited_pixel_values = np.stack([example["edited_pixel_values"] for example in examples]).astype(np.float32)
-    input_ids = np.stack([example["input_ids"] for example in examples])
+    np_original_pixel_values = np.stack([example["original_pixel_values"] for example in examples]).astype(np.float32)
+    np_edited_pixel_values = np.stack([example["edited_pixel_values"] for example in examples]).astype(np.float32)
+    np_input_ids = np.stack([example["input_ids"] for example in examples])
+
+    # Move data to accelerator
+    original_pixel_values  = jax.device_put(np_original_pixel_values)
+    edited_pixel_values = jax.device_put(np_edited_pixel_values)
+    input_ids = jax.device_put(np_input_ids)
+
     return {
         "original_pixel_values": original_pixel_values,
         "edited_pixel_values": edited_pixel_values,

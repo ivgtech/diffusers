@@ -25,50 +25,43 @@ def download_image(url):
 def create_key(seed=0):
     return jax.random.PRNGKey(seed)
 
+# %%
 # pipeline, params = FlaxStableDiffusionImg2ImgPipeline.from_pretrained(
-pipeline, params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
-    '../flax_models/instruct-pix2pix',
+pipeline, pipeline_params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
+    # '../flax_models/instruct-pix2pix',
     # '../flax_models/stable-diffusion-v1-5',
-    # './instruct-pix2pix-model', 
+    './instruct-pix2pix-model', 
     dtype=jnp.bfloat16,
     safety_checker=None
 )
+
 # %%
+load_non_ema_params = False # change if testing non-ema params
 
-save_unet_and_ema_params = False # change if both EMA and Unet parameters were saved to disk
-
-if save_unet_and_ema_params:
-    # If both EMA parameters and Unet parameters are saved to disk, load the EMA parameters from disk, and update the pipeline parameters with them
-    ema_params_path = './instruct-pix2pix-model/ema_params/ema_params.msgpack'
+if load_non_ema_params:
+    params_path = './instruct-pix2pix-model/unet/non_ema.msgpack'
 
     # Load the EMA parameters from disk
-    with open(ema_params_path, 'rb') as f:
-        ema_params = from_bytes(params['unet'], f.read()) # template object (here params['unet']) needs to be isomorphic to the target object
+    with open(params_path, 'rb') as f:
+        non_ema_params = from_bytes(pipeline_params['unet'], f.read()) # template object (here params['unet']) needs to be isomorphic to the target object
 
-    popped_item = params.pop('unet', None)
+    # Optionally, remove the 'unet' key from the pipeline parameters
+    popped_item = pipeline_params.pop('unet', None)
 
-    # Update the pipeline parameters with the loaded EMA parameters
-    params['unet'] = ema_params
+    # Update the pipeline params 
+    pipeline_params['non_ema'] = non_ema_params
 
 # Otherwise, only the EMA parameters are saved to disk under the 'unet' key in the params dictionary
-
-# %%
-
-# Cyborg 
-url = 'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
-image = download_image(url).resize((512, 512))
-prompt = 'turn him into cyborg'
-prompt = 'Generate a cartoonized version of the image'
 
 # %% 
 # Snowy mountains
 url = 'https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png'
 image = download_image(url).resize((512, 512))
-prompt = 'make the mountains snowy'
 prompt = 'Generate a cartoonized version of the image'
+prompt = 'make the mountains snowy'
+
 
 # %% 
-
 # Run the pipeline
 
 rng = create_key(1371)
@@ -78,7 +71,7 @@ prompt_ids, processed_image = pipeline.prepare_inputs(
     prompt=[prompt] * num_samples, image=[image] * num_samples
 )
 
-p_params = replicate(params)
+p_params = replicate(pipeline_params)
 prompt_ids = shard(prompt_ids)
 processed_image = shard(processed_image)
 
@@ -98,6 +91,16 @@ output_images = pipeline.numpy_to_pil(np.asarray(output.reshape((num_samples,) +
 # Grid plot images
 from diffusers.utils import make_image_grid
 make_image_grid(output_images, rows=len(output_images)//4, cols=4)
+
+
+# %%
+
+# Cyborg 
+url = 'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
+image = download_image(url).resize((512, 512))
+prompt = 'Generate a cartoonized version of the image'
+prompt = 'turn him into cyborg'
+
 
 
 # %%
