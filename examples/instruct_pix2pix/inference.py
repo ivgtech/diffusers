@@ -26,6 +26,7 @@ def create_key(seed=0):
     return jax.random.PRNGKey(seed)
 
 # %%
+
 # pipeline, params = FlaxStableDiffusionImg2ImgPipeline.from_pretrained(
 pipeline, pipeline_params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
     # '../flax_models/instruct-pix2pix',
@@ -57,9 +58,14 @@ if load_non_ema_params:
 # Snowy mountains
 url = 'https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png'
 image = download_image(url).resize((512, 512))
-prompt = 'Generate a cartoonized version of the image'
 prompt = 'make the mountains snowy'
 
+# Sunflowers
+
+url='https://wehco.media.clients.ellingtoncms.com/img/photos/2019/06/25/vangogh1_t800.png?90232451fbcadccc64a17de7521d859a8f88077d'
+# con
+image = download_image(url).resize((512, 512))
+prompt = 'Swap sunflowers with roses'
 
 # %% 
 # Run the pipeline

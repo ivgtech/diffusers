@@ -9,7 +9,7 @@ import requests
 import random
 from pathlib import Path
 from tqdm.auto import tqdm
-from typing import Any, Callable
+from typing import Any, Callable, Dict, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -78,7 +78,7 @@ args = {
 'random_flip': True,
 'train_batch_size': 4,
 'num_train_epochs': 100,
-'max_train_steps': 1500,
+'max_train_steps': 15000,
 'gradient_accumulation_steps': 4,
 'gradient_checkpointing': True,
 'learning_rate': 5e-05,
@@ -350,7 +350,10 @@ def get_nparams(params: FrozenDict) -> int:
             nparams += params[item].size
     return nparams
 
-class EMAState(TrainState, struct.PyTreeNode):
+
+
+
+class EMAState(struct.PyTreeNode):
     """
     Extends the TrainState to include exponential moving average (EMA) of the model parameters.
     
@@ -358,9 +361,41 @@ class EMAState(TrainState, struct.PyTreeNode):
         ema_params: A FrozenDict containing the EMA of the parameters.
     """
     ema_params: core.FrozenDict[str, Any] = struct.field(pytree_node=True)
+    # add a decay function to the EMAState
+    decay_fn: Callable[[float], "EMAState"] = struct.field(pytree_node=False)
+
+# Update EMA parameters using the dynamic decay rate calculation
+def _get_decay(
+    steps: int,
+    max_ema_decay: float = 0.999,
+    min_ema_decay: float = 0.5,
+    ema_decay_power: Union[float, int] = 2 / 3, 
+    ema_inv_gamma: Union[float, int] = 1.0,
+    ):
+
+    decay = 1.0 - (1.0 + (steps / ema_inv_gamma)) ** (-ema_decay_power)
+    return jnp.clip(decay, min_ema_decay, max_ema_decay)
+
+def get_decay(
+    steps,
+    max_ema_decay = 0.999,
+    min_ema_decay = 0.5,
+    ema_decay_power = 2 / 3, 
+    ema_inv_gamma = 1.0, 
+    start_ema_update_after_n_steps: int = 100,
+    ):
+    min_ema_decay = _get_decay(
+        start_ema_update_after_n_steps,
+    )
+
+    decay = 1.0 - (1.0 + (steps / ema_inv_gamma)) ** (-ema_decay_power)
+    # clip the decay to the min and max (0.999) values
+    # min being the _get_decay value at the start_ema_update_after_n_steps
+    return jnp.clip(decay, min_ema_decay, max_ema_decay)
 
 
-class ExtendedTrainState(TrainState):
+
+class ExtendedTrainState(TrainState, EMAState):
     """
     A simple train state for the common case with a single Optax optimizer that also tracks
     the exponential moving average (EMA) of the model parameters.
@@ -368,7 +403,7 @@ class ExtendedTrainState(TrainState):
     This state is extended to handle both the raw model parameters and their EMA values for
     training and validation purposes, respectively.
     """
-
+    # added the following fields to the TrainState
     def apply_gradients(self, grads: core.FrozenDict[str, Any], ema_decay: float = 0.999) -> "ExtendedTrainState":
         """
         Apply gradients to parameters and update EMA parameters.
@@ -384,6 +419,10 @@ class ExtendedTrainState(TrainState):
         updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
         new_params = optax.apply_updates(self.params, updates)
         
+        ema_decay = self.decay_fn(
+            self.step,
+        ) 
+
         # Update EMA parameters
         new_ema_params = jax.tree.map(
             lambda ema, p: ema * ema_decay + (1 - ema_decay) * p, self.ema_params, new_params
@@ -529,7 +568,7 @@ ema_params = copy.deepcopy(unet_params)
 print("Number of EMA parameters: ", get_nparams(ema_params))
 
 # Prepare optimizer and state, including EMA parameters
-state = EMAState.create(apply_fn=unet.__call__, params=unet_params, ema_params=ema_params, tx=optimizer)
+state = ExtendedTrainState.create(apply_fn=unet.__call__, params=unet_params, ema_params=ema_params, decay_fn=get_decay, tx=optimizer)
 
 noise_scheduler = FlaxDDPMScheduler(
     beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000
@@ -550,8 +589,7 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
             {"params": vae_params}, batch["edited_pixel_values"], deterministic=True, method=vae.encode
         )
         latents = vae_outputs.latent_dist.sample(sample_rng)
-        # (NHWC) -> (NCHW)
-        latents = jnp.einsum("ijkl->iljk", latents) * vae.config.scaling_factor
+        latents = jnp.einsum("ijkl->iljk", latents) * vae.config.scaling_factor  # (NHWC) -> (NCHW)
         noise_rng, timestep_rng = jax.random.split(sample_rng)
 
         # Sample noise that we'll add to the latents
@@ -582,8 +620,7 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
             {"params": vae_params}, batch["original_pixel_values"], deterministic=True, method=vae.encode
         )
         original_image_embeds = vae_image_outputs.latent_dist.mode()
-        # (NHWC) -> (NCHW)
-        original_image_embeds = jnp.einsum("ijkl->iljk", original_image_embeds)
+        original_image_embeds = jnp.einsum("ijkl->iljk", original_image_embeds) # (NHWC) -> (NCHW)
 
         # TODO: Implement conditioning dropout
 
@@ -660,21 +697,6 @@ for epoch in epochs:
         state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, batch, train_rngs)
         train_metrics.append(train_metric)
 
-        # Update EMA parameters
-        state.replace(
-            ema_params = ema_update(
-                state.params,
-                state.ema_params,
-                global_step,
-                args.max_ema_decay,
-                args.min_ema_decay,
-                args.ema_decay_power,
-                args.ema_inv_gamma,
-                args.start_ema_update_after,
-                args.update_ema_every,
-                )
-            )
-
         train_step_progress_bar.update(1)
 
         global_step += 1
@@ -716,8 +738,8 @@ if jax.process_index() == 0:
         params={
             "text_encoder": get_params_to_save(text_encoder_params),
             "vae": get_params_to_save(vae_params),
-            "unet": get_params_to_save(state.params),
-            "ema": get_params_to_save(state.ema_params),    
+            "unet": get_params_to_save(state.ema_params),
+            # "ema": get_params_to_save(state.ema_params),    
             # "tx": get_params_to_save(state.tx),
             "safety_checker": safety_checker.params,
         },
