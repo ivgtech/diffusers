@@ -376,7 +376,7 @@ def _get_decay(
     decay = 1.0 - (1.0 + (steps / ema_inv_gamma)) ** (-ema_decay_power)
     return jnp.clip(decay, min_ema_decay, max_ema_decay)
 
-def get_decay(
+def xget_decay(
     steps,
     max_ema_decay = 0.999,
     min_ema_decay = 0.5,
@@ -391,6 +391,33 @@ def get_decay(
     decay = 1.0 - (1.0 + (steps / ema_inv_gamma)) ** (-ema_decay_power)
     # clip the decay to the min and max (0.999) values
     # min being the _get_decay value at the start_ema_update_after_n_steps
+    return jnp.clip(decay, min_ema_decay, max_ema_decay)
+
+
+def get_decay(
+    step: int,
+    max_ema_decay: float = 0.9999,
+    min_ema_decay: float = 0.0,
+    ema_inv_gamma: float = 1.0,
+    ema_decay_power: float = 2 / 3,
+    use_ema_warmup: bool = True,
+    start_ema_update_after_n_steps: float = 10.0  # Mimic diffusers default value
+):
+    # Adjust step to consider the start update offset
+    adjusted_step = jnp.maximum(step - start_ema_update_after_n_steps - 1, 0)
+    
+    # Compute base decay depending on the warmup usage
+    if use_ema_warmup:
+        decay = 1.0 - (1.0 + adjusted_step / ema_inv_gamma) ** -ema_decay_power
+    else:
+        decay = (1.0 + adjusted_step) / (10.0 + adjusted_step) if start_ema_update_after_n_steps == 0 \
+                else (1.0 + adjusted_step) / (start_ema_update_after_n_steps + adjusted_step)
+
+    # Scale the decay by a multiple which is zero before the start and one afterwards
+    multiple = jnp.where(step > start_ema_update_after_n_steps, 1.0, 0.0)
+    decay *= multiple
+
+    # Clip the decay to ensure it stays within the specified bounds
     return jnp.clip(decay, min_ema_decay, max_ema_decay)
 
 
