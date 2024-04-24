@@ -61,11 +61,18 @@ image = download_image(url).resize((512, 512))
 prompt = 'make the mountains snowy'
 
 # Sunflowers
-
 url='https://wehco.media.clients.ellingtoncms.com/img/photos/2019/06/25/vangogh1_t800.png?90232451fbcadccc64a17de7521d859a8f88077d'
-# con
 image = download_image(url).resize((512, 512))
 prompt = 'Swap sunflowers with roses'
+
+# %%
+
+# Cyborg 
+url = 'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
+image = download_image(url).resize((512, 512))
+prompt = 'Generate a cartoonized version of the image'
+prompt = 'turn him into cyborg'
+
 
 # %% 
 # Run the pipeline
@@ -97,16 +104,6 @@ output_images = pipeline.numpy_to_pil(np.asarray(output.reshape((num_samples,) +
 # Grid plot images
 from diffusers.utils import make_image_grid
 make_image_grid(output_images, rows=len(output_images)//4, cols=4)
-
-
-# %%
-
-# Cyborg 
-url = 'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
-image = download_image(url).resize((512, 512))
-prompt = 'Generate a cartoonized version of the image'
-prompt = 'turn him into cyborg'
-
 
 
 # %%

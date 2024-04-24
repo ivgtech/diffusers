@@ -273,9 +273,25 @@ train_dataloader_torch = torch.utils.data.DataLoader(
     num_workers=args.dataloader_num_workers,
 )
 
+# Training dataloader: Creates a JAX generator from a standard PyTorch dataloader
+train_dataloader = NumpyLoader(
+    train_dataset, 
+    batch_size=args.train_batch_size,
+    num_workers= 0
+)
+
 
 
 # (3) Helper functions
+
+def get_nparams(params: FrozenDict) -> int:
+    nparams = 0
+    for item in params:
+        if isinstance(params[item], FrozenDict) or isinstance(params[item], dict):
+            nparams += get_nparams(params[item])
+        else:
+            nparams += params[item].size
+    return nparams
 
 def retrieve_latents_jax(image, vae, vae_params, key=None, sample_mode="sample"):
     # pass the image through the VAE to get the latents
@@ -293,106 +309,6 @@ def retrieve_latents_jax(image, vae, vae_params, key=None, sample_mode="sample")
         return encoder_output.latents
     else:
         raise ValueError(f"Invalid sample_mode: {sample_mode}")
-
-
-def NHWC_to_NCHW(tensor):
-    return jnp.einsum("ijkl->iljk", tensor)
-
-def retrieve_latents(**kwargs):
-    return NHWC_to_NCHW(retrieve_latents_jax(**kwargs))
-def curry_retrieve_and_transform(NHWC_to_NCHW_func):
-    def retrieve_and_transform(**kwargs):
-        latents = retrieve_latents_jax(**kwargs)
-        return NHWC_to_NCHW_func(latents)
-    return retrieve_and_transform
-
-
-def ema_update(
-    params: FrozenDict,
-    ema_params: FrozenDict,
-    steps: int,
-    max_ema_decay: float = 0.999,
-    min_ema_decay: float = 0.5,
-    ema_decay_power: float = 0.6666666,
-    ema_inv_gamma: float = 1.0,
-    start_ema_update_after: int = 100,
-    update_ema_every: int = 10,
-) -> FrozenDict:
-    """Incorporates updated model parameters into an exponential moving averaged
-    version of a model. It should be called after each optimizer step."""
-
-    def calculate_decay():
-        decay = 1.0 - (1.0 + (steps / ema_inv_gamma)) ** (-ema_decay_power)
-        return np.clip(decay, min_ema_decay, max_ema_decay)
-
-    if steps < start_ema_update_after:
-        """When EMA is not updated, return the current params"""
-        return params
-
-    if steps % update_ema_every == 0:
-        decay = calculate_decay()
-        decay_avg = 1.0 - decay
-
-        return jax.tree_util.tree_map(
-            lambda ema, p_new: decay_avg * ema + decay * p_new,
-            ema_params,
-            params,
-        )
-
-    return ema_params
-
-def get_nparams(params: FrozenDict) -> int:
-    nparams = 0
-    for item in params:
-        if isinstance(params[item], FrozenDict) or isinstance(params[item], dict):
-            nparams += get_nparams(params[item])
-        else:
-            nparams += params[item].size
-    return nparams
-
-
-
-
-class EMAState(struct.PyTreeNode):
-    """
-    Extends the TrainState to include exponential moving average (EMA) of the model parameters.
-    
-    Attributes:
-        ema_params: A FrozenDict containing the EMA of the parameters.
-    """
-    ema_params: core.FrozenDict[str, Any] = struct.field(pytree_node=True)
-    # add a decay function to the EMAState
-    decay_fn: Callable[[float], "EMAState"] = struct.field(pytree_node=False)
-
-# Update EMA parameters using the dynamic decay rate calculation
-def _get_decay(
-    steps: int,
-    max_ema_decay: float = 0.999,
-    min_ema_decay: float = 0.5,
-    ema_decay_power: Union[float, int] = 2 / 3, 
-    ema_inv_gamma: Union[float, int] = 1.0,
-    ):
-
-    decay = 1.0 - (1.0 + (steps / ema_inv_gamma)) ** (-ema_decay_power)
-    return jnp.clip(decay, min_ema_decay, max_ema_decay)
-
-def xget_decay(
-    steps,
-    max_ema_decay = 0.999,
-    min_ema_decay = 0.5,
-    ema_decay_power = 2 / 3, 
-    ema_inv_gamma = 1.0, 
-    start_ema_update_after_n_steps: int = 100,
-    ):
-    min_ema_decay = _get_decay(
-        start_ema_update_after_n_steps,
-    )
-
-    decay = 1.0 - (1.0 + (steps / ema_inv_gamma)) ** (-ema_decay_power)
-    # clip the decay to the min and max (0.999) values
-    # min being the _get_decay value at the start_ema_update_after_n_steps
-    return jnp.clip(decay, min_ema_decay, max_ema_decay)
-
 
 def get_decay(
     step: int,
@@ -420,35 +336,19 @@ def get_decay(
     # Clip the decay to ensure it stays within the specified bounds
     return jnp.clip(decay, min_ema_decay, max_ema_decay)
 
-
+class EMAState(struct.PyTreeNode):
+    ema_params: core.FrozenDict[str, Any] = struct.field(pytree_node=True)
+    # add a decay function to the EMAState
+    decay_fn: Callable[[float], "EMAState"] = struct.field(pytree_node=False)
 
 class ExtendedTrainState(TrainState, EMAState):
-    """
-    A simple train state for the common case with a single Optax optimizer that also tracks
-    the exponential moving average (EMA) of the model parameters.
-
-    This state is extended to handle both the raw model parameters and their EMA values for
-    training and validation purposes, respectively.
-    """
-    # added the following fields to the TrainState
     def apply_gradients(self, grads: core.FrozenDict[str, Any], ema_decay: float = 0.999) -> "ExtendedTrainState":
-        """
-        Apply gradients to parameters and update EMA parameters.
-        
-        Args:
-            grads: Gradients computed during backpropagation to be applied to the parameters.
-            ema_decay: The decay factor for the EMA parameters.
 
-        Returns:
-            An updated instance of `ExtendedTrainState` with updated params and ema_params.
-        """
-        # Standard parameter update
+       # Standard parameter update
         updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
         new_params = optax.apply_updates(self.params, updates)
         
-        ema_decay = self.decay_fn(
-            self.step,
-        ) 
+        ema_decay = self.decay_fn( self.step,) 
 
         # Update EMA parameters
         new_ema_params = jax.tree.map(
@@ -458,17 +358,6 @@ class ExtendedTrainState(TrainState, EMAState):
         return self.replace(params=new_params, opt_state=new_opt_state, ema_params=new_ema_params)
 
 
-
-
-
-# Training dataloader
-
-# Creates a JAX generator from a standard PyTorch dataloader
-train_dataloader = NumpyLoader(
-    train_dataset, 
-    batch_size=args.train_batch_size,
-    num_workers= 0
-)
 
 # Models and state
 
@@ -736,8 +625,8 @@ for epoch in epochs:
     epochs.write(f"Epoch... ({epoch + 1}/{args.num_train_epochs} | Loss: {train_metric['loss']})")
 
 
-    
-
+# %%  
+# Save trained model
 
 def get_params_to_save(params):
     return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
