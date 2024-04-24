@@ -51,9 +51,6 @@ DATASET_NAME_MAPPING = {
 
 WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
 
-
-
-
 class Args():
     def __init__(self, **kwargs):
       self.__dict__.update(kwargs)
@@ -125,9 +122,9 @@ def download_image(url):
     return image
 
 
-##################################################################################################################################################################################
-# DATA LOADERS 
-##################################################################################################################################################################################
+################################################################################################
+# Data loaders 
+################################################################################################
 
 tokenizer = CLIPTokenizer.from_pretrained("timbrooks/instruct-pix2pix", subfolder='tokenizer', dtype=jnp.bfloat16)
 # tokenizer = CLIPTokenizer.from_pretrained('../flax_models/instruct-pix2pix/tokenizer/')
@@ -260,6 +257,11 @@ def collate_fn(examples):
     }
 
 
+################################################################################################
+# Jax data loaders 
+################################################################################################
+
+# Data loaders 
 def collate_fn_jax(examples):
     np_original_pixel_values = np.stack([example["original_pixel_values"] for example in examples]).astype(np.float32)
     np_edited_pixel_values = np.stack([example["edited_pixel_values"] for example in examples]).astype(np.float32)
@@ -290,9 +292,9 @@ def torch_to_numpy(batch):
     # Convert a batch of PyTorch tensors to NumPy arrays.
     return {k: v.numpy() for k, v in batch.items()}
 
-class JAXDataLoader:
+class JAXLoader:
     """
-    training_generator = JAXDataLoader(train_dataloader_torch)
+    training_generator = JAXLoader(train_dataloader_torch)
 
     for epoch in range(num_epochs):
         start_time = time.time()
@@ -313,67 +315,35 @@ class JAXDataLoader:
             # Convert PyTorch tensors in the batch to NumPy arrays
             yield torch_to_numpy(batch)
 
-
 class NumpyLoader(data.DataLoader):
-  def __init__(self, dataset, batch_size=1,
-                shuffle=False, sampler=None,
-                batch_sampler=None, num_workers=0,
-                pin_memory=False, drop_last=False,
-                timeout=0, worker_init_fn=None):
-    super(self.__class__, self).__init__(dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        batch_sampler=batch_sampler,
-        num_workers=num_workers,
-        collate_fn=collate_fn_jax,
-        pin_memory=pin_memory,
-        drop_last=drop_last,
-        timeout=timeout,
-        worker_init_fn=worker_init_fn)
+    def __init__(self,
+                 dataset,
+                 batch_size=1,
+                 shuffle=False,
+                 sampler=None,
+                 batch_sampler=None,
+                 num_workers=0,
+                 pin_memory=False,
+                 drop_last=False,
+                 timeout=0,
+                 worker_init_fn=None
+                 ):
 
-
+    super(self.__class__, self).__init__(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            sampler=sampler,
+            batch_sampler=batch_sampler,
+            num_workers=num_workers,
+            collate_fn=collate_fn_jax,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
+            timeout=timeout,
+            worker_init_fn=worker_init_fn
+            )
 
             
-"""
-import numpy as np
-from jax.tree_util import tree_map
-from torch.utils import data
-from torchvision.datasets import MNIST
-
-def numpy_collate(batch):
-  return tree_map(np.asarray, data.default_collate(batch))
-
-class NumpyLoader(data.DataLoader):
-  def __init__(self, dataset, batch_size=1,
-                shuffle=False, sampler=None,
-                batch_sampler=None, num_workers=0,
-                pin_memory=False, drop_last=False,
-                timeout=0, worker_init_fn=None):
-    super(self.__class__, self).__init__(dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        batch_sampler=batch_sampler,
-        num_workers=num_workers,
-        collate_fn=numpy_collate,
-        pin_memory=pin_memory,
-        drop_last=drop_last,
-        timeout=timeout,
-        worker_init_fn=worker_init_fn)
-
-class FlattenAndCast(object):
-  def __call__(self, pic):
-    return np.ravel(np.array(pic, dtype=jnp.float32))
-
-# Define our dataset, using torch datasets
-# mnist_dataset = MNIST('/tmp/mnist/', download=True, transform=FlattenAndCast())
-# training_generator = NumpyLoader(mnist_dataset, batch_size=batch_size, num_workers=0)
-
-"""
-
-
-
 
 def plot_batch(sample, tokenizer):
     '''
@@ -383,6 +353,7 @@ def plot_batch(sample, tokenizer):
 
     # test dataloader by loading a batch and displaying the input_image, edit_prompt and edited_image
     # batch = next(iter(data_loader))
+
     original_images = sample["original_pixel_values"]
     edited_images = sample["edited_pixel_values"]
     captions = tokenizer.batch_decode(sample["input_ids"], skip_special_tokens=True)
@@ -408,7 +379,6 @@ def plot_batch(sample, tokenizer):
         plt.title(f'Prompt:"{caption}"')
         plt.show()
 
-
 def batch_to_pil_plus_text(batch, tokenizer):
     original_images = batch["original_pixel_values"]
     edited_images = batch["edited_pixel_values"]
@@ -432,22 +402,3 @@ def batch_to_pil_plus_text(batch, tokenizer):
     op_images = numpy_to_pil(np.array(org_numpy_images))
     ed_images = numpy_to_pil(np.array(ed_numpy_images))
     return op_images, ed_images, texts
-
-def xbatch_to_pil_plus_text(batch, tokenizer):
-    original_images = batch["original_pixel_values"]
-    edited_images = batch["edited_pixel_values"]
-
-    # (batch_size, 3, 256, 256) -> (batch_size, 256, 256, 3)
-    original_images = np.transpose(original_images, (0, 2, 3, 1))
-    edited_images = np.transpose(edited_images, (0, 2, 3, 1))
-
-    # denormalize to [0, 1] from [-1, 1]
-    original_images = (original_images + 1) / 2 
-    edited_images = (edited_images + 1) / 2
-
-    captions = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
-    return numpy_to_pil(original_images), numpy_to_pil(edited_images), captions
-
-
-show_batch =  lambda sample: plot_batch(sample, tokenizer)
-
