@@ -281,6 +281,7 @@ class EMAModel:
         """
         Compute the decay factor for the exponential moving average.
         """
+        #print(f'step/aka optimization_step={optimization_step}')
         step = max(0, optimization_step - self.update_after_step - 1)
 
         if step <= 0:
@@ -289,11 +290,14 @@ class EMAModel:
         if self.use_ema_warmup:
             cur_decay_value = 1 - (1 + step / self.inv_gamma) ** -self.power
         else:
+            print(step)
             cur_decay_value = (1 + step) / (10 + step)
 
         cur_decay_value = min(cur_decay_value, self.decay)
         # make sure decay is not smaller than min_decay
         cur_decay_value = max(cur_decay_value, self.min_decay)
+        #print( f'cur_decay_value={cur_decay_value}')
+
         return cur_decay_value
 
     @torch.no_grad()
