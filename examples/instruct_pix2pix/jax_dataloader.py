@@ -58,8 +58,8 @@ class Args():
 
 args = {
     "pretrained_model_name_or_path": "timbrooks/instruct-pix2pix",
-    "dataset_name": "fusing/instructpix2pix-1000-samples",
     "dataset_name": "timbrooks/instructpix2pix-clip-filtered",
+    "dataset_name": "fusing/instructpix2pix-1000-samples",
     "dataset_config_name": None,
     "train_data_dir": None,
     "cache_dir": None,

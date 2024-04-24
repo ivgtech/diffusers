@@ -55,8 +55,10 @@ if load_non_ema_params:
 
 # %% 
 # Snowy mountains
-url = 'https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png'
+url='https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png'
+url='https://cdn-lfs.huggingface.co/repos/f6/ea/f6ea2d9b15ffdf0b3d41d9f1adcc2056323a844b3c37335563295a4ccd8bbe3d/7405e2013907463cb6e0c1a15bab847b3d2f982ec4bd8f33610962cd23c87624?response-content-disposition=inline%3B+filename*%3DUTF-8%27%27mountain.png%3B+filename%3D%22mountain.png%22%3B&response-content-type=image%2Fpng&Expires=1714197929&Policy=eyJTdGF0ZW1lbnQiOlt7IkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiQVdTOkVwb2NoVGltZSI6MTcxNDE5NzkyOX19LCJSZXNvdXJjZSI6Imh0dHBzOi8vY2RuLWxmcy5odWdnaW5nZmFjZS5jby9yZXBvcy9mNi9lYS9mNmVhMmQ5YjE1ZmZkZjBiM2Q0MWQ5ZjFhZGNjMjA1NjMyM2E4NDRiM2MzNzMzNTU2MzI5NWE0Y2NkOGJiZTNkLzc0MDVlMjAxMzkwNzQ2M2NiNmUwYzFhMTViYWI4NDdiM2QyZjk4MmVjNGJkOGYzMzYxMDk2MmNkMjNjODc2MjQ%7EcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj0qJnJlc3BvbnNlLWNvbnRlbnQtdHlwZT0qIn1dfQ__&Signature=G4E-9YqrNqqAR1Vcn3bnxy9KX4vopcFs9xMltX-8nb%7E0bRFxov-IL0nj-i2rvU0Ijxdx4foLXy0oQdysQQf2Dn%7ESiEVX8ONxy%7E9h-bsmsGscfo9cusZPZMpA5BUahtko-480cJApwJ39ohLhxRXQ7%7EqFCerCZ9qRZpV2hV87To%7EyHb7CGOjMKlxIgD1Wr103cTLmEKi8Bwc-FyeO1Nu9AA0ryOBjQgpkmKjFwup71TkGJHS3pmhG%7EmyD1mSx2iWSK3NQlnMce6-%7E1yQzp3N1go4t%7EqIfq0qxcAKOyGoVPjn5-O-s52xGQYZ%7EDjFfKP9uGA0zKMoC3V7B389-SiMptQ__&Key-Pair-Id=KVTP0A1DKRTAX'
 image = download_image(url).resize((512, 512))
+prompt = 'Generate a cartoonized version of the image'
 prompt = 'make the mountains snowy'
 
 # %% 
@@ -70,8 +72,8 @@ prompt = 'Swap sunflowers with roses'
 # Cyborg 
 url = 'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
 image = download_image(url).resize((512, 512))
-prompt = 'turn him into cyborg'
 prompt = 'Generate a cartoonized version of the image'
+prompt = 'turn him into cyborg'
 
 
 # %% 

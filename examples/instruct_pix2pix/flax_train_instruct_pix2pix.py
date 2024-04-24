@@ -236,9 +236,10 @@ vae, vae_params = FlaxAutoencoderKL.from_pretrained(
 
 # Load the converted unet model
 save_dir = 'modified_unet'
-unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(save_dir, dtype=jnp.bfloat16)
-
-
+unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(
+    save_dir,
+    dtype=jnp.bfloat16
+)
 
 
 #def main():
@@ -374,9 +375,28 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
         original_image_embeds = vae_image_outputs.latent_dist.mode()
         original_image_embeds = jnp.einsum("ijkl->iljk", original_image_embeds) # (NHWC) -> (NCHW)
 
-        # TODO: Implement conditioning dropout
+        # Conditioning dropout to support classifier-free guidance during inference. For more details
+        # check out the section 3.2.1 of the original paper https://arxiv.org/abs/2211.09800.
+        def tokenize_captions(captions):
+            inputs = tokenizer(
+                captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="np")
+            return inputs.input_ids
+        # Conditional dropout for text embeddings
+        random_p = jax.random.uniform(dropout_rng, (bsz,), minval=0.0, maxval=1.0)
+        prompt_mask = random_p < 2 * args.conditioning_dropout_prob
+        # Get the text embedding for the null conditioning
+        null_conditioning = text_encoder(
+            tokenize_captions([""]),
+            params=text_encoder_params,
+            train=False,
+        )[0]
+        encoder_hidden_states = jax.numpy.where(prompt_mask[:, None, None], null_conditioning, encoder_hidden_states)
+        # Conditional dropout for image embeddings
+        image_mask = jax.numpy.logical_and(random_p >= args.conditioning_dropout_prob, random_p < 3 * args.conditioning_dropout_prob)
+        image_mask = image_mask[:, None, None, None]
+        original_image_embeds = image_mask * original_image_embeds
 
-        # Concatenate the `original_image_embeds` with the `noisy_latents`.
+        # Concatenate the noisy latents with the original image embeddings
         concatenated_noisy_latents = jnp.concatenate([noisy_latents, original_image_embeds], axis=1)
 
         # Predict the noise residual and compute loss
