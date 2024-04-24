@@ -25,7 +25,6 @@ def download_image(url):
 def create_key(seed=0):
     return jax.random.PRNGKey(seed)
 
-# %%
 
 # pipeline, params = FlaxStableDiffusionImg2ImgPipeline.from_pretrained(
 pipeline, pipeline_params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
@@ -60,6 +59,7 @@ url = 'https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/m
 image = download_image(url).resize((512, 512))
 prompt = 'make the mountains snowy'
 
+# %% 
 # Sunflowers
 url='https://wehco.media.clients.ellingtoncms.com/img/photos/2019/06/25/vangogh1_t800.png?90232451fbcadccc64a17de7521d859a8f88077d'
 image = download_image(url).resize((512, 512))
@@ -70,8 +70,8 @@ prompt = 'Swap sunflowers with roses'
 # Cyborg 
 url = 'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
 image = download_image(url).resize((512, 512))
-prompt = 'Generate a cartoonized version of the image'
 prompt = 'turn him into cyborg'
+prompt = 'Generate a cartoonized version of the image'
 
 
 # %% 
@@ -107,21 +107,21 @@ make_image_grid(output_images, rows=len(output_images)//4, cols=4)
 
 
 # %%
-import torch  
-from diffusers import StableDiffusionInstructPix2PixPipeline
-from diffusers import FlaxStableDiffusionInstructPix2PixPipeline
+# import torch  
+# from diffusers import StableDiffusionInstructPix2PixPipeline
+# from diffusers import FlaxStableDiffusionInstructPix2PixPipeline
 
-model_id = "timbrooks/instruct-pix2pix"
+# model_id = "timbrooks/instruct-pix2pix"
 
-pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-     model_id, 
-    torch_dtype=torch.float32, 
-    safety_checker=None
-)
+# pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+#      model_id, 
+#     torch_dtype=torch.float32, 
+#     safety_checker=None
+# )
 
 
-images = pipe(prompt, image=image).images
-images[0].show()
+# images = pipe(prompt, image=image).images
+# images[0].show()
 
 
 

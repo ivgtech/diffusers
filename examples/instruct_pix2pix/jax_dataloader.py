@@ -47,17 +47,19 @@ logger = logging.getLogger(__name__)
 
 DATASET_NAME_MAPPING = {
     "fusing/instructpix2pix-1000-samples": ("input_image", "edit_prompt", "edited_image"),
+    "timbrooks/instructpix2pix-clip-filtered": ("original_image", "edit_prompt", "edited_image"),
 }
 
 WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
 
 class Args():
     def __init__(self, **kwargs):
-      self.__dict__.update(kwargs)
-      
+        self.__dict__.update(kwargs)
+
 args = {
     "pretrained_model_name_or_path": "timbrooks/instruct-pix2pix",
     "dataset_name": "fusing/instructpix2pix-1000-samples",
+    "dataset_name": "timbrooks/instructpix2pix-clip-filtered",
     "dataset_config_name": None,
     "train_data_dir": None,
     "cache_dir": None,
@@ -75,8 +77,22 @@ args = {
     "report_to": "wandb",
     "hub_token": None,
     "seed": 42,
+    "streaming": False
 }
+
 args = Args(**args)
+
+# Set streaming to True if using the instructpix2pix-clip-filtered dataset.
+if args.dataset_name == "timbrooks/instructpix2pix-clip-filtered":
+    args.streaming = True
+else:
+    args.streaming= False
+
+# Set column names for the dataset.
+if args.dataset_name == "timbrooks/instructpix2pix-clip-filtered":
+    args.original_image_column = "original_image"
+    args.edit_prompt_column = "edit_prompt"
+    args.edited_image_column = "edited_image"
 
 if args.report_to == "wandb" and args.hub_token is not None:
     raise ValueError(
@@ -141,6 +157,7 @@ if args.dataset_name is not None:
         args.dataset_name,
         args.dataset_config_name,
         cache_dir=args.cache_dir,
+        streaming=args.streaming,
     )
 else:
     data_files = {}
@@ -150,6 +167,7 @@ else:
         "imagefolder",
         data_files=data_files,
         cache_dir=args.cache_dir,
+        streaming=args.streaming,
     )
     # See more about loading custom images at
     # https://huggingface.co/docs/datasets/main/en/image_load#imagefolder
@@ -160,6 +178,8 @@ column_names = dataset["train"].column_names
 
 # 6. Get the column names for input/target.
 dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
+
+
 if args.original_image_column is None:
     original_image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
 else:
@@ -236,25 +256,22 @@ def preprocess_train(examples):
     examples["input_ids"] = tokenize_captions(captions)
     return examples
 
-if args.max_train_samples is not None:
+if args.max_train_samples is not None and args.streaming == False:
     dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
 
 
 # Set the training transforms
-train_dataset = dataset["train"].with_transform(preprocess_train)
+if not args.streaming:
+    train_dataset = dataset["train"].with_transform(preprocess_train)
+else:
+
+    shuffled_train_dataset = dataset["train"].shuffle(seed=args.seed,  buffer_size=100)
+    # use map to apply the preprocessing function to the dataset
+    train_dataset = shuffled_train_dataset.map(preprocess_train, batched=True)
 
 
-def collate_fn(examples):
-    original_pixel_values = torch.stack([example["original_pixel_values"] for example in examples])
-    original_pixel_values = original_pixel_values.to(memory_format=torch.contiguous_format).float()
-    edited_pixel_values = torch.stack([example["edited_pixel_values"] for example in examples])
-    edited_pixel_values = edited_pixel_values.to(memory_format=torch.contiguous_format).float()
-    input_ids = torch.stack([example["input_ids"] for example in examples])
-    return {
-        "original_pixel_values": original_pixel_values,
-        "edited_pixel_values": edited_pixel_values,
-        "input_ids": input_ids,
-    }
+
+
 
 
 ################################################################################################
@@ -279,70 +296,40 @@ def collate_fn_jax(examples):
     }
 
 
-# DataLoaders creation:
-train_dataloader_torch = torch.utils.data.DataLoader(
-    train_dataset,
-    shuffle=True,
-    collate_fn=collate_fn,
-    batch_size=args.train_batch_size,
-    num_workers=args.dataloader_num_workers,
-)
-
-def torch_to_numpy(batch):
-    # Convert a batch of PyTorch tensors to NumPy arrays.
-    return {k: v.numpy() for k, v in batch.items()}
-
-class JAXLoader:
-    """
-    training_generator = JAXLoader(train_dataloader_torch)
-
-    for epoch in range(num_epochs):
-        start_time = time.time()
-        for batch in training_generator:
-            images, labels = batch["images"], batch["labels"]
-            labels = one_hot(labels, n_targets)  # Convert labels to one-hot encoding
-            params = update(params, images, labels)  # Update model parameters
-        epoch_time = time.time() - start_time
-        # Compute accuracy on training and test datasets
-    """
-    def __init__(self, dataloader, batch_size=1, num_devices=1):
-        self.dataloader = dataloader
-        self.batch_size = batch_size
-        self.num_devices = num_devices
-
-    def __iter__(self):
-        for batch in self.dataloader:   
-            # Convert PyTorch tensors in the batch to NumPy arrays
-            yield torch_to_numpy(batch)
-
 class NumpyLoader(data.DataLoader):
-    def __init__(self,
-                 dataset,
-                 batch_size=1,
-                 shuffle=False,
-                 sampler=None,
-                 batch_sampler=None,
-                 num_workers=0,
-                 pin_memory=False,
-                 drop_last=False,
-                 timeout=0,
-                 worker_init_fn=None
-                 ):
-
-    super(self.__class__, self).__init__(
+    def __init__(
+        self,
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        sampler=None,
+        batch_sampler=None,
+        num_workers=0,
+        pin_memory=False,
+        drop_last=False,
+        timeout=0,
+        worker_init_fn=None,
+        collate_fn=None,
+        ):
+        super(self.__class__, self).__init__(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             sampler=sampler,
             batch_sampler=batch_sampler,
             num_workers=num_workers,
-            collate_fn=collate_fn_jax,
             pin_memory=pin_memory,
             drop_last=drop_last,
             timeout=timeout,
-            worker_init_fn=worker_init_fn
+            worker_init_fn=worker_init_fn,
+            collate_fn=collate_fn_jax
             )
 
+        from datasets import IterableDataset
+        if isinstance(dataset, IterableDataset):
+            self.dataset_len =  self.dataset.info.splits['train'].num_examples
+        else:
+            self.dataset_len = len(self.dataset)
             
 
 def plot_batch(sample, tokenizer):

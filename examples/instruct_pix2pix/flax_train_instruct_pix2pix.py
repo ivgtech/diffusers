@@ -41,7 +41,7 @@ from diffusers import (
 from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecker
 from diffusers.utils import check_min_version
 
-from jax_dataloader import NumpyLoader, train_dataset, show_batch, batch_to_pil_plus_text ### 
+from jax_dataloader import NumpyLoader, train_dataset 
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
@@ -121,169 +121,14 @@ class Args:
         self.__dict__.update(entries) 
 args = Args(**args)
 
-
-
-# (2) Dataset 
-
-def convert_to_np(image, resolution):
-    image = image.convert("RGB").resize((resolution, resolution))
-    return np.array(image).transpose(2, 0, 1)
-
-def download_image(url):
-    image = PIL.Image.open(requests.get(url, stream=True).raw)
-    image = PIL.ImageOps.exif_transpose(image)
-    image = image.convert("RGB")
-    return image
-
-tokenizer = CLIPTokenizer.from_pretrained(
-    args.pretrained_model_name_or_path,
-    subfolder='tokenizer', 
-    dtype=jnp.bfloat16
-    )
-
-# Get the datasets: you can either provide your own training and evaluation files (see below)
-# or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
-
-# In distributed training, the load_dataset function guarantees that only one local process can concurrently
-# download the dataset.
-if args.dataset_name is not None:
-    # Downloading and loading a dataset from the hub.
-    dataset = load_dataset(
-        args.dataset_name,
-        args.dataset_config_name,
-        cache_dir=args.cache_dir,
-    )
-else:
-    data_files = {}
-    if args.train_data_dir is not None:
-        data_files["train"] = os.path.join(args.train_data_dir, "**")
-    dataset = load_dataset(
-        "imagefolder",
-        data_files=data_files,
-        cache_dir=args.cache_dir,
-    )
-    # See more about loading custom images at
-    # https://huggingface.co/docs/datasets/main/en/image_load#imagefolder
-
-# Preprocessing the datasets.
-# We need to tokenize inputs and targets.
-column_names = dataset["train"].column_names
-
-# 6. Get the column names for input/target.
-dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
-if args.original_image_column is None:
-    original_image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
-else:
-    original_image_column = args.original_image_column
-    if original_image_column not in column_names:
-        raise ValueError(
-            f"--original_image_column' value '{args.original_image_column}' needs to be one of: {', '.join(column_names)}"
-        )
-if args.edit_prompt_column is None:
-    edit_prompt_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
-else:
-    edit_prompt_column = args.edit_prompt_column
-    if edit_prompt_column not in column_names:
-        raise ValueError(
-            f"--edit_prompt_column' value '{args.edit_prompt_column}' needs to be one of: {', '.join(column_names)}"
-        )
-if args.edited_image_column is None:
-    edited_image_column = dataset_columns[2] if dataset_columns is not None else column_names[2]
-else:
-    edited_image_column = args.edited_image_column
-    if edited_image_column not in column_names:
-        raise ValueError(
-            f"--edited_image_column' value '{args.edited_image_column}' needs to be one of: {', '.join(column_names)}"
-        )
-
-
-# Preprocessing the datasets.
-# We need to tokenize input captions and transform the images.
-def tokenize_captions(captions):
-    inputs = tokenizer(
-        captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
-    )
-    return inputs.input_ids
-
-# Preprocessing the datasets.
-train_transforms = transforms.Compose(
-    [
-        transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
-        transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
-    ]
-)
-
-def preprocess_images(examples):
-    original_images = np.concatenate(
-        [convert_to_np(image, args.resolution) for image in examples[original_image_column]]
-    )
-    edited_images = np.concatenate(
-        [convert_to_np(image, args.resolution) for image in examples[edited_image_column]]
-    )
-    # We need to ensure that the original and the edited images undergo the same
-    # augmentation transforms.
-    images = np.concatenate([original_images, edited_images])
-    images = torch.tensor(images)
-    images = 2 * (images / 255) - 1
-    return train_transforms(images)
-
-def preprocess_train(examples):
-    # Preprocess images.
-    preprocessed_images = preprocess_images(examples)
-    # Since the original and edited images were concatenated before
-    # applying the transformations, we need to separate them and reshape
-    # them accordingly.
-    original_images, edited_images = preprocessed_images.chunk(2)
-    original_images = original_images.reshape(-1, 3, args.resolution, args.resolution)
-    edited_images = edited_images.reshape(-1, 3, args.resolution, args.resolution)
-
-    # Collate the preprocessed images into the `examples`.
-    examples["original_pixel_values"] = original_images
-    examples["edited_pixel_values"] = edited_images
-
-    # Preprocess the captions.
-    captions = list(examples[edit_prompt_column])
-    examples["input_ids"] = tokenize_captions(captions)
-    return examples
-
-if args.max_train_samples is not None:
-    dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
-
-# Set the training transforms
-train_dataset = dataset["train"].with_transform(preprocess_train)
-
-def collate_fn(examples):
-    original_pixel_values = torch.stack([example["original_pixel_values"] for example in examples])
-    original_pixel_values = original_pixel_values.to(memory_format=torch.contiguous_format).float()
-    edited_pixel_values = torch.stack([example["edited_pixel_values"] for example in examples])
-    edited_pixel_values = edited_pixel_values.to(memory_format=torch.contiguous_format).float()
-    input_ids = torch.stack([example["input_ids"] for example in examples])
-    return {
-        "original_pixel_values": original_pixel_values,
-        "edited_pixel_values": edited_pixel_values,
-        "input_ids": input_ids,
-    }
-
-# DataLoaders creation:
-train_dataloader_torch = torch.utils.data.DataLoader(
-    train_dataset,
-    shuffle=True,
-    collate_fn=collate_fn,
-    batch_size=args.train_batch_size,
-    num_workers=args.dataloader_num_workers,
-)
-
-# Training dataloader: Creates a JAX generator from a standard PyTorch dataloader
+# (2) Data loader: Creates a JAX generator from a standard PyTorch dataloader
 train_dataloader = NumpyLoader(
     train_dataset, 
     batch_size=args.train_batch_size,
     num_workers= 0
 )
 
-
-
 # (3) Helper functions
-
 def get_nparams(params: FrozenDict) -> int:
     nparams = 0
     for item in params:
@@ -343,8 +188,7 @@ class EMAState(struct.PyTreeNode):
 
 class ExtendedTrainState(TrainState, EMAState):
     def apply_gradients(self, grads: core.FrozenDict[str, Any], ema_decay: float = 0.999) -> "ExtendedTrainState":
-
-       # Standard parameter update
+        # Standard parameter update
         updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
         new_params = optax.apply_updates(self.params, updates)
         
@@ -412,14 +256,6 @@ else:
 
 if args.seed is not None: set_seed(args.seed)
 
-# Training dataloader
-
-# Creates a JAX generator from a standard PyTorch dataloader
-train_dataloader = NumpyLoader(
-    train_dataset, 
-    batch_size=args.train_batch_size,
-    num_workers= 0
-)
 
 # Models and state
 
@@ -582,7 +418,9 @@ text_encoder_params = jax_utils.replicate(text_encoder.params)
 vae_params = jax_utils.replicate(vae_params)
 
 # Train!
-num_update_steps_per_epoch = math.ceil(len(train_dataloader))
+len_train_dataset =  train_dataloader.dataset_len
+
+num_update_steps_per_epoch = math.ceil(len_train_dataset)
 
 # Scheduler and math around the number of training steps.
 if args.max_train_steps is None:
@@ -591,7 +429,7 @@ if args.max_train_steps is None:
 args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
 logger.info("***** Running training *****")
-logger.info(f"  Num examples = {len(train_dataset)}")
+logger.info(f"  Num examples = {len_train_dataset}")
 logger.info(f"  Num Epochs = {args.num_train_epochs}")
 logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
 logger.info(f"  Total train batch size (w. parallel & distributed) = {total_train_batch_size}")
@@ -605,7 +443,7 @@ for epoch in epochs:
     # ======================== Training ================================
     train_metrics = []
 
-    steps_per_epoch = len(train_dataset) // total_train_batch_size
+    steps_per_epoch = len_train_dataset // total_train_batch_size
     train_step_progress_bar = tqdm(total=steps_per_epoch, desc="Training...", position=1, leave=False)
     # train
     for batch in train_dataloader:
