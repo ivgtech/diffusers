@@ -24,19 +24,21 @@ base_model = UNet2DConditionModel(
     sample_size=32,
     in_channels=4,
     out_channels=4,
-    down_block_types=("DownBlock2D", "CrossAttnDownBlock2D"),
-    up_block_types=("CrossAttnUpBlock2D", "UpBlock2D"),
+    down_block_types=('DownBlock2D', 'CrossAttnDownBlock2D'),
+    up_block_types=('CrossAttnUpBlock2D', 'UpBlock2D'),
     cross_attention_dim=32,
 )
 
 instruct_model = UNet2DConditionModel.from_pretrained(
     'timbrooks/instruct-pix2pix',
-    subfolder="unet",
+    subfolder='unet',
 )
 
+# Creates a PyTorch unet model with 8 input channels instead of the default 4, then loads non-EMA weights from the 'flax' revision
 model = UNet2DConditionModel.from_pretrained(
     'runwayml/stable-diffusion-v1-5',
-    subfolder="unet",
+    subfolder='unet',
+    # revision='non-ema', # Using a non-documented approach to load the non-EMA weights via the 'flax' revision
     in_channels=8,
     low_cpu_mem_usage=False,
     ignore_mismatched_sizes=True,
@@ -68,7 +70,7 @@ assert torch_output.shape == instruct_torch_output.shape
 flax_sample = jnp.array(sample.numpy())
 flax_text_emb = jnp.array(text_emb.numpy())
 
-flax_output = flax_model.apply({"params":flax_params}, flax_sample, time, flax_text_emb).sample
+flax_output = flax_model.apply({'params':flax_params}, flax_sample, time, flax_text_emb).sample
 
 # Step 3: Check that the values are close
 converted_flax_output = torch.from_numpy(np.array(flax_output))
@@ -87,17 +89,17 @@ if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 
 # Save the model parameters
-params_path = os.path.join(save_dir, "flax_model_params.msgpack")
+params_path = os.path.join(save_dir, 'flax_model_params.msgpack')
 flax_model.save_pretrained(save_dir, params=flax_params, _internal_call=True)
 
 # Save the model configuration
-config_path = os.path.join(save_dir, "config.json")
+config_path = os.path.join(save_dir, 'config.json')
 
-with open(config_path, "w") as f:
+with open(config_path, 'w') as f:
     # json.dump(unfreeze(flax_model.config).to_dict(), f)
     json.dump(flax_model.config, f)
 
-print(f"Model, parameters, and configuration saved in directory: {save_dir}")
+print(f'Model, parameters, and configuration saved in directory: {save_dir}')
 
 
 

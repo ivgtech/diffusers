@@ -5,16 +5,17 @@ from flax_common_imports import *
  #                                                             Save SD pipeline
  ##############################################################################
 
-outdir = '../flax_models/stable-diffusion-v1-5'
+outdir = '/home/v/diffusers/examples/flax_models/stable-diffusion-v1-5'
 
 # save pipeline to disk
 if not os.path.exists(outdir):
+    print("Saving pipeline to disk ...")
 
-    # load flax pipeline from from huggingface
+    # load flax pipeline from from huggingface an non-EMA weights for the unet and vae models
     pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
         'runwayml/stable-diffusion-v1-5', 
-        revision='bf16',
-        dtype=jax.numpy.bfloat16
+        revision='flax',  # non-EMA weights (use 'bf16' for EMA weights)
+        # from_pt=True, # not an option here as there is no .bin file for this revision
     )
 
     pipeline = FlaxStableDiffusionPipeline(
@@ -37,6 +38,7 @@ if not os.path.exists(outdir):
         },
     )
 else:
+    print("Pipeline already saved to disk. Loading pipeline ...")
     pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
         outdir,
         revision="flax",
@@ -90,8 +92,8 @@ make_image_grid(images, rows=len(images)// jax.device_count(), cols=4)
 #                                                        JAX inference (no pipeline)
  ###################################################################################
 
-outdir = '../flax_models/stable-diffusion-v1-5'
-revision = 'bf16'
+outdir = '/home/v/diffusers/examples/flax_models/stable-diffusion-v1-5'
+revision = 'flax'
 dtype = jax.numpy.bfloat16
 
 # Load models and create wrapper for stable diffusion
