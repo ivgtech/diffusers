@@ -30,7 +30,6 @@ from huggingface_hub import create_repo, upload_folder
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPImageProcessor, CLIPTokenizer, FlaxCLIPTextModel, set_seed
-
 from diffusers import (
     FlaxAutoencoderKL,
     FlaxDDPMScheduler,
