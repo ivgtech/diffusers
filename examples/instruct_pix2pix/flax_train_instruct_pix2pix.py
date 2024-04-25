@@ -41,7 +41,23 @@ from diffusers import (
 from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecker
 from diffusers.utils import check_min_version
 
-from jax_dataloader import NumpyLoader, train_dataset 
+# from jax_dataloader import NumpyLoader, train_dataset 
+# from prepare_dataset import tf_train_dataloader as train_dataloader
+
+# (2) Data loader: Creates a JAX generator from a standard PyTorch dataloader
+# train_dataloader = NumpyLoader(
+#     train_dataset, 
+#     batch_size=4,
+#     num_workers= 0
+# )
+
+from parquet import train_dataset
+
+DATASET_SIZE = train_dataset['original_pixel_values'].shape[0]
+
+
+
+
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
@@ -51,7 +67,9 @@ logger = logging.getLogger(__name__)
 
 DATASET_NAME_MAPPING = {
     "fusing/instructpix2pix-1000-samples": ("input_image", "edit_prompt", "edited_image"),
+    "timbrooks/instructpix2pix-clip-filtered": ("original_image", "edit_prompt", "edited_image"),
 }
+
 WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
 
 # convert the namespace to a dictionary
@@ -59,7 +77,8 @@ args = {
 'pretrained_model_name_or_path': 'runwayml/stable-diffusion-v1-5',
 'revision': 'flax',
 'variant': None,
-'dataset_name': 'fusing/instructpix2pix-1000-samples',
+# 'dataset_name': 'fusing/instructpix2pix-1000-samples',
+'dataset_name': 'timbrooks/instructpix2pix-clip-filtered', # Size of the auto-converted Parquet files: 130 GB. Number of rows: 313,010. Columns: original_image, edit_prompt, edited_image
 'dataset_config_name': None,
 'train_data_dir': None,
 'original_image_column': 'input_image',
@@ -120,13 +139,6 @@ class Args:
     def __init__(self, **entries):
         self.__dict__.update(entries) 
 args = Args(**args)
-
-# (2) Data loader: Creates a JAX generator from a standard PyTorch dataloader
-train_dataloader = NumpyLoader(
-    train_dataset, 
-    batch_size=args.train_batch_size,
-    num_workers= 0
-)
 
 # (3) Helper functions
 def get_nparams(params: FrozenDict) -> int:
@@ -438,7 +450,7 @@ text_encoder_params = jax_utils.replicate(text_encoder.params)
 vae_params = jax_utils.replicate(vae_params)
 
 # Train!
-len_train_dataset =  train_dataloader.dataset_len
+len_train_dataset =  DATASET_SIZE # len(train_dataloader) # train_dataloader.dataset_len
 
 num_update_steps_per_epoch = math.ceil(len_train_dataset)
 
@@ -455,7 +467,6 @@ logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
 logger.info(f"  Total train batch size (w. parallel & distributed) = {total_train_batch_size}")
 logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
-# %%
 
 global_step = 0
 epochs = tqdm(range(args.num_train_epochs), desc="Epoch ... ", position=0)
@@ -466,8 +477,9 @@ for epoch in epochs:
     steps_per_epoch = len_train_dataset // total_train_batch_size
     train_step_progress_bar = tqdm(total=steps_per_epoch, desc="Training...", position=1, leave=False)
     # train
-    for batch in train_dataloader:
-        batch = shard(batch)
+    for batch_data in zip(*train_dataset.values()):
+        # original_images, input_ids, edited_images = batch_data
+        batch = shard(batch_data)
         state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, batch, train_rngs)
         train_metrics.append(train_metric)
 
@@ -483,7 +495,6 @@ for epoch in epochs:
     epochs.write(f"Epoch... ({epoch + 1}/{args.num_train_epochs} | Loss: {train_metric['loss']})")
 
 
-# %%  
 # Save trained model
 
 def get_params_to_save(params):

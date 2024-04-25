@@ -72,8 +72,8 @@ prompt = 'Swap sunflowers with roses'
 # Cyborg 
 url = 'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
 image = download_image(url).resize((512, 512))
+prompt = 'turn him into a cyborg'
 prompt = 'Generate a cartoonized version of the image'
-prompt = 'turn him into cyborg'
 
 
 # %% 
@@ -96,6 +96,8 @@ output = pipeline(
     params=p_params,
     prng_seed=rng,
     num_inference_steps=50,
+    guidance_scale=7.5,
+    image_guidance_scale=1.2,
     height=512,
     width=512,
     jit=True, # include for img2img
