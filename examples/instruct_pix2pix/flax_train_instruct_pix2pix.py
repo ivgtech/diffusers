@@ -51,9 +51,7 @@ from diffusers.utils import check_min_version
 #     num_workers= 0
 # )
 
-from parquet import train_dataset
-
-DATASET_SIZE = train_dataset['original_pixel_values'].shape[0]
+from parquet import train_dataset, DATASET_SIZE
 
 
 
@@ -477,9 +475,12 @@ for epoch in epochs:
     steps_per_epoch = len_train_dataset // total_train_batch_size
     train_step_progress_bar = tqdm(total=steps_per_epoch, desc="Training...", position=1, leave=False)
     # train
+    # for batch in train_dataset.values():
     for batch_data in zip(*train_dataset.values()):
-        # original_images, input_ids, edited_images = batch_data
-        batch = shard(batch_data)
+        original_images, input_ids, edited_images = batch_data
+        batch = {"original_pixel_values": original_images, "input_ids": input_ids, "edited_pixel_values": edited_images, }
+
+        batch = shard(batch)
         state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, batch, train_rngs)
         train_metrics.append(train_metric)
 
