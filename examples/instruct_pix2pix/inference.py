@@ -222,8 +222,10 @@ def run_inference(
         jit=jit, # include for img2img
     ).images
 
+    # As the output returns in batches of num_devices, reshape the output  (N, H, W, C) ->(N, H, W, C)
+    #output_images = jnp.einsum('...hwc->...chw', output)    
+
     H,W,C = output.shape[-3:]
-    # As the output returns in batches of num_devices, reshape the output to (N, H, W, C)
     output_images = pipeline.numpy_to_pil(np.asarray(output.reshape(-1, H, W, C)))
     return output_images
 

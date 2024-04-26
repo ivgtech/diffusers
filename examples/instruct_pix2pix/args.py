@@ -135,33 +135,9 @@ class Args:
 
 args = Args(**args)
 
-
-
-total_train_batch_size = args.train_batch_size * jax.local_device_count()
-
-try:
-    len_train_dataset = LEN_TRAIN_DATASET
-except NameError:
-    len_train_dataset = 1000
-
-num_update_steps_per_epoch = math.ceil(len_train_dataset)
-
-# Scheduler and math around the number of training steps.
-if args.max_train_steps is None:
-    args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-
-args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-
-print(f"  Total training steps = {args.max_train_steps}")
-print(f"  Dataset size = {len_train_dataset}")
-print(f"  Num Epochs = {args.num_train_epochs}")
-print(f"  Instantaneous batch size per device = {args.train_batch_size}")
-print(f"  Total train batch size (w. parallel & distributed) = {total_train_batch_size}")
-
-LEN_TRAIN_DATASET = len_train_dataset
-NUM_UPDATE_STEPS_PER_EPOCH = num_update_steps_per_epoch
-TOTAL_TRAIN_BATCH_SIZE = total_train_batch_size
+NUM_DEVICES = jax.device_count()
+DEVICE_TYPE = jax.devices()[0].device_kind # 'TPU v4' etc.
+TOTAL_TRAIN_BATCH_SIZE = args.train_batch_size * jax.device_count()
 TRAIN_BATCH_SIZE = args.train_batch_size
 MAX_TRAIN_STEPS = args.max_train_steps
 NUM_TRAIN_EPOCHS = args.num_train_epochs
-NUM_LOCAL_DEVICES = jax.local_device_count()

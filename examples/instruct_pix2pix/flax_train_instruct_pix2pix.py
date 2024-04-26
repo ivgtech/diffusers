@@ -2,9 +2,20 @@
 from args import * 
 
 args.parquet = True
-from jax_dataloader import NumpyLoader, train_dataset
+from tensorflow_prepare import tf_dataset 
 
-from tensorflow_prepare import tf_dataset as train_dataset
+#  (1) Data preparation
+# Constructs an iterable, JAX compatible dataset from a local Parquet file using TensorFlow Dataset
+# Keep in mind that the tf datasets are not loaded into memory, but rather lazily evaluated, and must be: 
+#     (1) moved to the accelerator device before being used in the training loop
+#     (2) batched so that each batch can be sharded 
+#     (3) converted to numpy arrays before being used in the training loop
+#     (4) each batch must be evenly divisible by the number of devices 
+batch_size = args.train_batch_size * jax.device_count()  # Adjust based on your device count and memory
+train_dataset = tf_dataset.batch(batch_size, drop_remainder=True)  # Drop the last incomplete batch
+len_train_dataset = len(train_dataset) * batch_size  #train_dataloader.dataset_len
+
+# from jax_dataloader import NumpyLoader, train_dataset
 
 # (2) Data loader
 # from jax_dataloader import NumpyLoader, train_dataset 
@@ -249,6 +260,7 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
         )
         latents = vae_outputs.latent_dist.sample(sample_rng)
         latents = jnp.einsum("ijkl->iljk", latents) * vae.config.scaling_factor  # (NHWC) -> (NCHW)
+        # latents = jnp.einsum("...hwc->...chw", latents) * vae.config.scaling_factor  # (NHWC) -> (NCHW)
         noise_rng, timestep_rng = jax.random.split(sample_rng)
 
         # Sample noise that we'll add to the latents
@@ -279,6 +291,7 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
             {"params": vae_params}, batch["original_pixel_values"], deterministic=True, method=vae.encode
         )
         original_image_embeds = vae_image_outputs.latent_dist.mode()
+        # original_image_embeds = jnp.einsum("...hwc->...chw", original_image_embeds) # (NHWC) -> (NCHW)
         original_image_embeds = jnp.einsum("ijkl->iljk", original_image_embeds) # (NHWC) -> (NCHW)
 
         # Conditioning dropout to support classifier-free guidance during inference. For more details
@@ -345,7 +358,7 @@ text_encoder_params = jax_utils.replicate(text_encoder.params)
 vae_params = jax_utils.replicate(vae_params)
 
 # Train!
-len_train_dataset = len(train_dataset) #train_dataloader.dataset_len
+# len_train_dataset = len(train_dataset) #train_dataloader.dataset_len
 
 num_update_steps_per_epoch = math.ceil(len_train_dataset)
 
@@ -364,22 +377,21 @@ logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
 
 
-# Convert dataset generator to produce sharded batches
-def prepare_batches(dataset, batch_size):
-    # Generator to convert TF dataset to sharded batches for JAX
-    for batch in dataset.batch(batch_size):
-        # Convert TF batch to NumPy and reshape for sharding
-        numpy_batch = tf.nest.map_structure(lambda x: x.numpy(), batch)
-        # Shard the batch
-        sharded_batch = jax.tree_map(lambda x: x.reshape((jax.local_device_count(), -1) + x.shape[1:]), numpy_batch)
-        yield sharded_batch
+# # Convert dataset generator to produce sharded batches
+# def prepare_batches(dataset, batch_size):
+#     # Generator to convert TF dataset to sharded batches for JAX
+#     for batch in dataset.batch(batch_size):
+#         # Convert TF batch to NumPy and reshape for sharding
+#         # numpy_batch = tf.nest.map_structure(lambda x: x.numpy(), batch)
+#         # Shard the batch
+#         sharded_batch = jax.tree.map(lambda x: x.reshape((jax.local_device_count(), -1) + x.shape[1:]), batch)
+#         yield sharded_batch
 
 
 
-
-# Create sharded data iterator
-batch_size = args.train_batch_size * jax.local_device_count()  # Adjust based on your device count and memory
-sharded_data_iterator = prepare_batches(train_dataset, batch_size)
+# # Create sharded data iterator
+# batch_size = args.train_batch_size * jax.local_device_count()  # Adjust based on your device count and memory
+# sharded_data_iterator = prepare_batches(train_dataset, batch_size)
 
 
 
@@ -394,14 +406,23 @@ for epoch in epochs:
     # train
 
     # for batch in train_dataloader:
-    # for batch in train_dataloader:
-    for sharded_batch in sharded_data_iterator:
-
-        # check if batch is evenly divisible by the number of devices
+    for batch in train_dataset:
+        # Unless you are using a dataset or sampler that uses `drop_last` (which typically drops the last non-full batch of each worker's dataset replica), check if each batch is evenly divisible by the number of devices
         # if len(batch["input_ids"]) % jax.device_count() != 0:
         #     continue
-        # batch = shard(batch)
-        state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, sharded_batch, train_rngs)
+
+        # Reify each batch before passing to the training step (NOTE: assumes dataset is batched for num of devices and args.train_batch_size)
+        batch = jax.tree.map(lambda x: jax.device_get(x), batch)
+        batch = shard(batch)
+
+        '''
+        (4, 4, 77)
+        (4, 4, 3, 256, 256)
+        (4, 4, 3, 256, 256)
+        batch = shard(sharded_batch)
+        (4, 1, 4, 3, 256, 256)
+        '''
+        state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, batch, train_rngs)
         train_metrics.append(train_metric)
 
         train_step_progress_bar.update(1)
