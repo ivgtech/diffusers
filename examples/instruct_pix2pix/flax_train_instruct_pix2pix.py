@@ -364,6 +364,25 @@ logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
 
 
+# Convert dataset generator to produce sharded batches
+def prepare_batches(dataset, batch_size):
+    # Generator to convert TF dataset to sharded batches for JAX
+    for batch in dataset.batch(batch_size):
+        # Convert TF batch to NumPy and reshape for sharding
+        numpy_batch = tf.nest.map_structure(lambda x: x.numpy(), batch)
+        # Shard the batch
+        sharded_batch = jax.tree_map(lambda x: x.reshape((jax.local_device_count(), -1) + x.shape[1:]), numpy_batch)
+        yield sharded_batch
+
+
+
+
+# Create sharded data iterator
+batch_size = args.train_batch_size * jax.local_device_count()  # Adjust based on your device count and memory
+sharded_data_iterator = prepare_batches(train_dataset, batch_size)
+
+
+
 global_step = 0
 epochs = tqdm(range(args.num_train_epochs), desc="Epoch ... ", position=0)
 for epoch in epochs:
@@ -375,12 +394,14 @@ for epoch in epochs:
     # train
 
     # for batch in train_dataloader:
-    for batch in train_dataset:
+    # for batch in train_dataloader:
+    for sharded_batch in sharded_data_iterator:
+
         # check if batch is evenly divisible by the number of devices
-        if len(batch["input_ids"]) % jax.device_count() != 0:
-            continue
-        batch = shard(batch)
-        state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, batch, train_rngs)
+        # if len(batch["input_ids"]) % jax.device_count() != 0:
+        #     continue
+        # batch = shard(batch)
+        state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, sharded_batch, train_rngs)
         train_metrics.append(train_metric)
 
         train_step_progress_bar.update(1)

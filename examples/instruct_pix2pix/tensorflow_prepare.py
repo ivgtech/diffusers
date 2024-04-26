@@ -10,50 +10,6 @@ import matplotlib.pyplot as plt
 from transformers import CLIPImageProcessor, CLIPTokenizer, FlaxCLIPTextModel, set_seed
 
 
-# # Assuming necessary imports and configurations are already done
-
-# def _read_dataset_from_parquet(parquet_file):
-#     table = pq.read_table(parquet_file)
-#     data = table.to_pydict()
-#     return data
-
-# def preprocess_image(image_bytes):
-#     print(type(image_bytes))
-#     image = Image.open(io.BytesIO(image_bytes))
-#     #image = image.convert("RGB")  # Ensure RGB format
-#     #image = image.resize((256, 256))  # Resize to the desired resolution
-#     image = np.array(image) / 255.0  # Normalize to [0, 1]
-#     return image.astype(np.float32)
-
-# def create_tf_dataset(data):
-#     # Convert data to TensorFlow Dataset
-#     tf_dataset = tf.data.Dataset.from_tensor_slices(data)
-#     return tf_dataset
-
-# batch_size = jax.device_count() 
-
-# def prepare_data_for_tpu(tf_dataset, batch_size=batch_size):
-#     # Preprocess and batch the data
-#     def _preprocess_features(original_image, edited_image, edit_prompt):
-#         return {
-#             "original_image": preprocess_image(original_image),
-#             "edited_image": preprocess_image(edited_image),
-#             "edit_prompt": edit_prompt
-#         }
-
-#     tf_dataset = tf_dataset.map(_preprocess_features)
-#     #tf_dataset = tf_dataset.map(_preprocess_features, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-#     tf_dataset = tf_dataset.batch(batch_size)
-#     #tf_dataset = tf_dataset.prefetch(tf.data.experimental.AUTOTUNE)
-#     return tf_dataset
-
-# # Example usage
-
-# parquet_file = 'data/train-00000-of-00262-57cebf95b4a9170c.parquet'
-# data = read_dataset_from_parquet(parquet_file)
-
-
-
 def read_dataset_from_parquet(parquet_file):
     # Load the parquet file
     table = pq.read_table(parquet_file)
@@ -93,7 +49,7 @@ def tokenize_captions(captions):
         truncation=True,
         return_tensors="np"
     )
-    return inputs.input_ids
+    return inputs.input_ids[0] # NOTE: We want to shard (N,77) and not  (N,1,77) where N is the batch size
 
 def f(x):
     if isinstance(x,str):
@@ -102,6 +58,7 @@ def f(x):
     image = x.convert("RGB")  # Ensure RGB format
     image = image.resize((256, 256))  # Resize to the desired resolution
     image = np.array(image) / 255.0  # Normalize to [0, 1]
+    image = np.array(image).transpose(2, 0, 1) # HWC to CHW as the VAE model expects CHW format
     return image.astype(np.float32)
 
 def create_tf_dataset(data):
@@ -113,16 +70,17 @@ pf = 'data/train-00000-of-00262-57cebf95b4a9170c.parquet'
 xs = read_dataset_from_parquet(pf)
 data = jax.tree.map(f, xs)
 
-# %% 
+
 # NOTE: tf.data.Dataset.from_tensor_slices divides up the dataset along the first or batch dimension
 # So, we need to ensure that the data is already batched before passing it to tf.data.Dataset.from_tensor_slices
 # otherwise the call essentially hangs
 
 tf_dataset = create_tf_dataset({
-    "original_image": np.array(data['original_image']),
-    "edited_image": np.array(data['edited_image']),
-    "edit_prompt": np.array(data['edit_prompt'])
+    "original_pixel_values": np.array(data['original_image']),
+    "edited_pixel_values": np.array(data['edited_image']),
+    "input_ids": np.array(data['edit_prompt'])
 })
+
 
 
 
@@ -138,7 +96,7 @@ def show_lazy_eval_images(N=4):
     # Use the map function to apply the conversion
     numpy_dataset = xs.map(lambda x: tf.py_function(
         to_numpy, 
-        [x['original_image'], x['edited_image'], x['edit_prompt']], 
+        [x['original_pixel_values'], x['edited_pixel_values'], x['input_ids']], 
         [tf.float32, tf.float32, tf.int64]))  # Specify the correct output types
 
     # Convert to list of tuples (original_image, edited_image, edit_prompt)
