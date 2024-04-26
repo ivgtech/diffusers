@@ -2,7 +2,32 @@
 from args import * 
 
 args.parquet = True
-from tensorflow_prepare import tf_dataset 
+
+# if jax process index is 0, then load the dataset
+# if jax.process_index() == 0:
+#     from tensorflow_prepare import get_tf_dataset_from_parquet, plot_images, tokenizer
+#     tf_dataset = get_tf_dataset_from_parquet()
+#     batch_size = args.train_batch_size * jax.device_count()  # Adjust based on your device count and memory
+#     train_dataset = tf_dataset.batch(batch_size, drop_remainder=True)  # Drop the last incomplete batch
+#    len_train_dataset = len(train_dataset) * batch_size  #train_dataloader.dataset_len
+
+if jax.process_index() == 0:
+    from jax_dataloader import NumpyLoader, train_dataset
+    len_train_dataset = len(train_dataset)
+
+    train_dataloader = NumpyLoader(
+        train_dataset, 
+        batch_size=args.train_batch_size,
+        num_workers= 0
+    )
+
+
+    
+
+# plot_images(tf_dataset, tokenizer, N=5)
+
+# tf_dataset = get_tf_dataset_from_parquet()
+# plot_images(tf_dataset, tokenizer, N=5)
 
 #  (1) Data preparation
 # Constructs an iterable, JAX compatible dataset from a local Parquet file using TensorFlow Dataset
@@ -11,21 +36,10 @@ from tensorflow_prepare import tf_dataset
 #     (2) batched so that each batch can be sharded 
 #     (3) converted to numpy arrays before being used in the training loop
 #     (4) each batch must be evenly divisible by the number of devices 
-batch_size = args.train_batch_size * jax.device_count()  # Adjust based on your device count and memory
-train_dataset = tf_dataset.batch(batch_size, drop_remainder=True)  # Drop the last incomplete batch
-len_train_dataset = len(train_dataset) * batch_size  #train_dataloader.dataset_len
 
-# from jax_dataloader import NumpyLoader, train_dataset
-
-# (2) Data loader
-# from jax_dataloader import NumpyLoader, train_dataset 
-# from prepare_dataset import tf_train_dataloader as train_dataloader
-
-# train_dataloader = NumpyLoader(
-#     train_dataset, 
-#     batch_size=args.train_batch_size,
-#     num_workers= 0
-# )
+# batch_size = args.train_batch_size * jax.device_count()  # Adjust based on your device count and memory
+# train_dataset = tf_dataset.batch(batch_size, drop_remainder=True)  # Drop the last incomplete batch
+# len_train_dataset = len(train_dataset) * batch_size  #train_dataloader.dataset_len
 
 
 # Set the parameters for the DataLoader
@@ -44,6 +58,8 @@ len_train_dataset = len(train_dataset) * batch_size  #train_dataloader.dataset_l
 # )
 
 
+
+# %% 
 
 # (3) Helper functions
 def get_nparams(params: FrozenDict) -> int:
@@ -368,7 +384,10 @@ if args.max_train_steps is None:
 
 args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
+
 logger.info("***** Running training *****")
+timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+logger.info(f"  Starting at: {timestamp}")
 logger.info(f"  Num examples = {len_train_dataset}")
 logger.info(f"  Num Epochs = {args.num_train_epochs}")
 logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
@@ -405,8 +424,8 @@ for epoch in epochs:
     train_step_progress_bar = tqdm(total=steps_per_epoch, desc="Training...", position=1, leave=False)
     # train
 
-    # for batch in train_dataloader:
-    for batch in train_dataset:
+    for batch in train_dataloader:
+    # for batch in train_dataset:
         # Unless you are using a dataset or sampler that uses `drop_last` (which typically drops the last non-full batch of each worker's dataset replica), check if each batch is evenly divisible by the number of devices
         # if len(batch["input_ids"]) % jax.device_count() != 0:
         #     continue
@@ -437,7 +456,15 @@ for epoch in epochs:
     epochs.write(f"Epoch... ({epoch + 1}/{args.num_train_epochs} | Loss: {train_metric['loss']})")
 
 
-# Save trained model
+timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+logger.info(f"  Finished at: {timestamp}")
+
+
+logger.info("***** Saving model *****")
+# output_dir = Path(args.output_dir)
+# output_dir.mkdir(exist_ok=True, parents=True)
+# save_dir = output_dir / f"{timestamp}"
+# save_dir.mkdir(exist_ok=True)
 
 def get_params_to_save(params):
     return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
@@ -472,5 +499,8 @@ if jax.process_index() == 0:
         },
     )
 
+logger.info("***** Model saved *****")
+timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+logger.info(f"  Completed at: {timestamp}")
 
 # %%
