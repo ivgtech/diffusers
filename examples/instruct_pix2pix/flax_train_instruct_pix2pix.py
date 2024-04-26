@@ -4,16 +4,19 @@ from args import *
 args.parquet = True
 from jax_dataloader import NumpyLoader, train_dataset
 
+from tensorflow_prepare import tf_dataset as train_dataset
 
 # (2) Data loader
 # from jax_dataloader import NumpyLoader, train_dataset 
 # from prepare_dataset import tf_train_dataloader as train_dataloader
 
-train_dataloader = NumpyLoader(
-    train_dataset, 
-    batch_size=args.train_batch_size,
-    num_workers= 0
-)
+# train_dataloader = NumpyLoader(
+#     train_dataset, 
+#     batch_size=args.train_batch_size,
+#     num_workers= 0
+# )
+
+
 # Set the parameters for the DataLoader
 # batch_size = 4  # Number of samples in each batch
 # shuffle = True  # Whether to shuffle the data at every epoch
@@ -370,7 +373,9 @@ for epoch in epochs:
     steps_per_epoch = len_train_dataset // total_train_batch_size
     train_step_progress_bar = tqdm(total=steps_per_epoch, desc="Training...", position=1, leave=False)
     # train
-    for batch in train_dataloader:
+
+    # for batch in train_dataloader:
+    for batch in train_dataset:
         # check if batch is evenly divisible by the number of devices
         if len(batch["input_ids"]) % jax.device_count() != 0:
             continue
