@@ -1,142 +1,35 @@
 # %% 
-import os
-import math
-import PIL
-import copy
-import argparse
-import logging
-import requests
-import random
-from pathlib import Path
-from tqdm.auto import tqdm
-from typing import Any, Callable, Dict, Optional, Union
+from args import * 
 
-import jax
-import jax.numpy as jnp
-import numpy as np
-import optax
-from flax import jax_utils
-from flax.training import train_state
-from flax.training.train_state import TrainState
-from flax.training.common_utils import shard
-from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
-from flax import core, struct
-from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT
+args.parquet = True
+from jax_dataloader import NumpyLoader, train_dataset
 
-import torch
-import torch.utils.checkpoint
-from torchvision import transforms
-import transformers
-from transformers import CLIPImageProcessor, CLIPTokenizer, FlaxCLIPTextModel, set_seed
-from datasets import load_dataset
-from huggingface_hub import create_repo, upload_folder
 
-from diffusers import (
-    FlaxAutoencoderKL,
-    FlaxDDPMScheduler,
-    FlaxPNDMScheduler,
-    FlaxStableDiffusionPipeline,
-    FlaxUNet2DConditionModel,
-)
-from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecker
-from diffusers.utils import check_min_version
-
+# (2) Data loader
 # from jax_dataloader import NumpyLoader, train_dataset 
 # from prepare_dataset import tf_train_dataloader as train_dataloader
 
-# (2) Data loader: Creates a JAX generator from a standard PyTorch dataloader
-# train_dataloader = NumpyLoader(
-#     train_dataset, 
-#     batch_size=4,
-#     num_workers= 0
+train_dataloader = NumpyLoader(
+    train_dataset, 
+    batch_size=args.train_batch_size,
+    num_workers= 0
+)
+# Set the parameters for the DataLoader
+# batch_size = 4  # Number of samples in each batch
+# shuffle = True  # Whether to shuffle the data at every epoch
+# num_workers = 4  # How many subprocesses to use for data loading
+# pin_memory = True  # If True, the data loader will copy Tensors into CUDA pinned memory before returning them
+
+# # Create the DataLoader
+# train_dataloader = DataLoader(
+#     train_dataset,
+#     batch_size=batch_size,
+#     shuffle=shuffle,
+#     num_workers=num_workers,
+#     pin_memory=pin_memory
 # )
 
-from parquet import train_dataset, DATASET_SIZE
 
-
-
-
-
-
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.28.0.dev0")
-
-logger = logging.getLogger(__name__)
-
-DATASET_NAME_MAPPING = {
-    "fusing/instructpix2pix-1000-samples": ("input_image", "edit_prompt", "edited_image"),
-    "timbrooks/instructpix2pix-clip-filtered": ("original_image", "edit_prompt", "edited_image"),
-}
-
-WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
-
-# convert the namespace to a dictionary
-args = {
-'pretrained_model_name_or_path': 'runwayml/stable-diffusion-v1-5',
-'revision': 'flax',
-'variant': None,
-# 'dataset_name': 'fusing/instructpix2pix-1000-samples',
-'dataset_name': 'timbrooks/instructpix2pix-clip-filtered', # Size of the auto-converted Parquet files: 130 GB. Number of rows: 313,010. Columns: original_image, edit_prompt, edited_image
-'dataset_config_name': None,
-'train_data_dir': None,
-'original_image_column': 'input_image',
-'edited_image_column': 'edited_image',
-'edit_prompt_column': 'edit_prompt',
-'val_image_url': None,
-'validation_prompt': None,
-'num_validation_images': 4,
-'validation_epochs': 1,
-'max_train_samples': None,
-'output_dir': 'instruct-pix2pix-model',
-'cache_dir': None,
-'seed': 42,
-'resolution': 256,
-'center_crop': False,
-'random_flip': True,
-'train_batch_size': 4,
-'num_train_epochs': 100,
-'max_train_steps': 15000,
-'gradient_accumulation_steps': 4,
-'gradient_checkpointing': True,
-'learning_rate': 5e-05,
-'scale_lr': False,
-'lr_scheduler': 'constant',
-'lr_warmup_steps': 0,
-'conditioning_dropout_prob': 0.05,
-'use_8bit_adam': False,
-'allow_tf32': False,
-'use_ema': False,
-'non_ema_revision': None,
-'dataloader_num_workers': 0,
-'adam_beta1': 0.9,
-'adam_beta2': 0.999,
-'adam_weight_decay': 0.01,
-'adam_epsilon': 1e-08,
-'max_grad_norm': 1.0,
-'push_to_hub': True,
-'hub_token': None,
-'hub_model_id': None,
-'logging_dir': 'logs',
-'mixed_precision': 'bf16',
-'report_to': 'tensorboard',
-'local_rank': -1,
-'checkpointing_steps': 5000,
-'checkpoints_total_limit': 1,
-'resume_from_checkpoint': None,
-'enable_xformers_memory_efficient_attention': True,
-'from_pt': False,
-'max_ema_decay': 0.999,
-'min_ema_decay': 0.5,
-'ema_decay_power': 0.6666666,
-'ema_inv_gamma': 1.0,
-'start_ema_update_after': 100,
-'update_ema_every': 10,
-}
-
-class Args:
-    def __init__(self, **entries):
-        self.__dict__.update(entries) 
-args = Args(**args)
 
 # (3) Helper functions
 def get_nparams(params: FrozenDict) -> int:
@@ -391,6 +284,7 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
             inputs = tokenizer(
                 captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="np")
             return inputs.input_ids
+
         # Conditional dropout for text embeddings
         random_p = jax.random.uniform(dropout_rng, (bsz,), minval=0.0, maxval=1.0)
         prompt_mask = random_p < 2 * args.conditioning_dropout_prob
@@ -448,7 +342,7 @@ text_encoder_params = jax_utils.replicate(text_encoder.params)
 vae_params = jax_utils.replicate(vae_params)
 
 # Train!
-len_train_dataset =  DATASET_SIZE # len(train_dataloader) # train_dataloader.dataset_len
+len_train_dataset = len(train_dataset) #train_dataloader.dataset_len
 
 num_update_steps_per_epoch = math.ceil(len_train_dataset)
 
@@ -466,6 +360,7 @@ logger.info(f"  Total train batch size (w. parallel & distributed) = {total_trai
 logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
 
+
 global_step = 0
 epochs = tqdm(range(args.num_train_epochs), desc="Epoch ... ", position=0)
 for epoch in epochs:
@@ -475,11 +370,10 @@ for epoch in epochs:
     steps_per_epoch = len_train_dataset // total_train_batch_size
     train_step_progress_bar = tqdm(total=steps_per_epoch, desc="Training...", position=1, leave=False)
     # train
-    # for batch in train_dataset.values():
-    for batch_data in zip(*train_dataset.values()):
-        original_images, input_ids, edited_images = batch_data
-        batch = {"original_pixel_values": original_images, "input_ids": input_ids, "edited_pixel_values": edited_images, }
-
+    for batch in train_dataloader:
+        # check if batch is evenly divisible by the number of devices
+        if len(batch["input_ids"]) % jax.device_count() != 0:
+            continue
         batch = shard(batch)
         state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, batch, train_rngs)
         train_metrics.append(train_metric)
@@ -531,5 +425,5 @@ if jax.process_index() == 0:
         },
     )
 
-# %%
 
+# %%

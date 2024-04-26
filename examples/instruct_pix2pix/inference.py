@@ -2,6 +2,7 @@
 
 import requests
 from io import BytesIO
+import PIL
 from PIL import Image
 import jax
 import numpy as np
@@ -35,7 +36,6 @@ pipeline, pipeline_params = FlaxStableDiffusionInstructPix2PixPipeline.from_pret
     safety_checker=None
 )
 
-# %%
 load_non_ema_params = False # change if testing non-ema params
 
 if load_non_ema_params:
@@ -58,8 +58,8 @@ if load_non_ema_params:
 url='https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png'
 url='https://cdn-lfs.huggingface.co/repos/f6/ea/f6ea2d9b15ffdf0b3d41d9f1adcc2056323a844b3c37335563295a4ccd8bbe3d/7405e2013907463cb6e0c1a15bab847b3d2f982ec4bd8f33610962cd23c87624?response-content-disposition=inline%3B+filename*%3DUTF-8%27%27mountain.png%3B+filename%3D%22mountain.png%22%3B&response-content-type=image%2Fpng&Expires=1714197929&Policy=eyJTdGF0ZW1lbnQiOlt7IkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiQVdTOkVwb2NoVGltZSI6MTcxNDE5NzkyOX19LCJSZXNvdXJjZSI6Imh0dHBzOi8vY2RuLWxmcy5odWdnaW5nZmFjZS5jby9yZXBvcy9mNi9lYS9mNmVhMmQ5YjE1ZmZkZjBiM2Q0MWQ5ZjFhZGNjMjA1NjMyM2E4NDRiM2MzNzMzNTU2MzI5NWE0Y2NkOGJiZTNkLzc0MDVlMjAxMzkwNzQ2M2NiNmUwYzFhMTViYWI4NDdiM2QyZjk4MmVjNGJkOGYzMzYxMDk2MmNkMjNjODc2MjQ%7EcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj0qJnJlc3BvbnNlLWNvbnRlbnQtdHlwZT0qIn1dfQ__&Signature=G4E-9YqrNqqAR1Vcn3bnxy9KX4vopcFs9xMltX-8nb%7E0bRFxov-IL0nj-i2rvU0Ijxdx4foLXy0oQdysQQf2Dn%7ESiEVX8ONxy%7E9h-bsmsGscfo9cusZPZMpA5BUahtko-480cJApwJ39ohLhxRXQ7%7EqFCerCZ9qRZpV2hV87To%7EyHb7CGOjMKlxIgD1Wr103cTLmEKi8Bwc-FyeO1Nu9AA0ryOBjQgpkmKjFwup71TkGJHS3pmhG%7EmyD1mSx2iWSK3NQlnMce6-%7E1yQzp3N1go4t%7EqIfq0qxcAKOyGoVPjn5-O-s52xGQYZ%7EDjFfKP9uGA0zKMoC3V7B389-SiMptQ__&Key-Pair-Id=KVTP0A1DKRTAX'
 image = download_image(url).resize((512, 512))
-prompt = 'Generate a cartoonized version of the image'
 prompt = 'make the mountains snowy'
+prompt = 'Generate a cartoonized version of the image'
 
 # %% 
 # Sunflowers
@@ -109,6 +109,128 @@ output_images = pipeline.numpy_to_pil(np.asarray(output.reshape((num_samples,) +
 from diffusers.utils import make_image_grid
 make_image_grid(output_images, rows=len(output_images)//4, cols=4)
 
+
+# %%
+
+text_prompts = [
+    "wipe out the lake",
+    "make the mountains snowy",
+    "Generate a cartoonized version of the image",
+    "turn him into a cyborg",
+    "Generate a cartoonized version of the image",
+    "Swap sunflowers with roses",
+    "Generate a cartoonized version of the image",
+]
+image_prompts = [
+    "https://huggingface.co/datasets/sayakpaul/sample-datasets/resolve/main/test_pix2pix_4.png",
+    "https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png",
+    "https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png",
+    "https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg",
+    "https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg",
+    "https://wehco.media.clients.ellingtoncms.com/img/photos/2019/06/25/vangogh1_t800.png?90232451fbcadccc64a17de7521d859a8f88077d",
+    "https://wehco.media.clients.ellingtoncms.com/img/photos/2019/06/25/vangogh1_t800.png?90232451fbcadccc64a17de7521d859a8f88077d",
+]
+
+def download_image(url):
+    image = PIL.Image.open(requests.get(url, stream=True).raw)
+    image = PIL.ImageOps.exif_transpose(image)
+    image = image.convert("RGB")
+    return image
+
+
+import matplotlib.pyplot as plt
+
+def show_images(images):
+    # Plot images in rows of four (4)
+    rows = len(images) // 4
+    for i in range(rows):
+        plt.figure(figsize=(20, 20))
+        for j in range(4):
+            plt.subplot(1, 4, j + 1)
+            plt.imshow(images[i * 4 + j])
+            plt.axis('off')
+        plt.show()
+
+
+def run_inference(
+    imageprompts, 
+    text_prompts, 
+    num_inference_steps=50,
+    image_guidance_scale=1.2,
+    guidance_scale=7.5,
+    height=512,
+    width=512,
+    jit=True,
+    ):
+
+    rng = create_key(1371)
+    num_samples = jax.device_count()
+    rng = jax.random.split(rng, jax.device_count())
+
+    image_prompts = []
+    # Download images if necessary and resize to 512x512
+    for i, image in enumerate(imageprompts):
+        if isinstance(image, PIL.Image.Image):
+            image = image.resize((512, 512))
+        elif isinstance(image, str):
+            image = download_image(image).resize((512, 512))
+        image_prompts.append(image)
+
+
+    prompt_ids, processed_images  = [], []
+
+    # Pad prompts so that they are a multiple of the number of TPU devices
+    if len(text_prompts) < num_samples or (len(image_prompts) % num_samples != 0):
+        multiple = int(np.ceil(len(text_prompts)/ num_samples))
+        # replicate the shortfalls
+        text_prompts = text_prompts * multiple * num_samples
+        image_prompts = image_prompts * multiple * num_samples
+        text_prompts = text_prompts[:multiple * num_samples]
+        image_prompts = image_prompts[:multiple * num_samples]
+
+    # Preprocess (tokenize) the prompts and images one at a time
+    while len(text_prompts) > 0:
+        prompt, image = text_prompts.pop(), image_prompts.pop()
+        prompt_id, processed_image = pipeline.prepare_inputs(
+            prompt=prompt , image=image
+        )
+        prompt_ids.append(prompt_id)
+        processed_images.append(processed_image)
+
+    # Convert to numpy arrays and remove the singleton dimension (N,1,77 etc.)
+    ids = np.array(prompt_ids).squeeze(1)
+    imgs = np.array(processed_images).squeeze(1)
+
+    print(ids.shape, imgs.shape)
+    p_params = replicate(pipeline_params)
+
+    # Now each device gets a individual prompt and image if N > num_samples
+    prompt_ids = shard(ids)
+    processed_image = shard(imgs)
+    print(prompt_ids.shape, processed_image.shape)
+
+    output = pipeline(
+        prompt_ids=prompt_ids,
+        image=processed_image,
+        params=p_params,
+        prng_seed=rng,
+        num_inference_steps=num_inference_steps,
+        guidance_scale=guidance_scale,
+        image_guidance_scale=image_guidance_scale,
+        height=height,
+        width=width,
+        jit=jit, # include for img2img
+    ).images
+
+    H,W,C = output.shape[-3:]
+    # As the output returns in batches of num_devices, reshape the output to (N, H, W, C)
+    output_images = pipeline.numpy_to_pil(np.asarray(output.reshape(-1, H, W, C)))
+    return output_images
+
+images = run_inference(image_prompts, text_prompts)
+
+# ... and display the results
+show_images(images)
 
 # %%
 # import torch  
