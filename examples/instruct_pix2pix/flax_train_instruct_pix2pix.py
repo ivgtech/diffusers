@@ -59,7 +59,6 @@ if jax.process_index() == 0:
 
 
 
-# %% 
 
 # (3) Helper functions
 def get_nparams(params: FrozenDict) -> int:
@@ -412,7 +411,7 @@ logger.info(f"  Total optimization steps = {args.max_train_steps}")
 # batch_size = args.train_batch_size * jax.local_device_count()  # Adjust based on your device count and memory
 # sharded_data_iterator = prepare_batches(train_dataset, batch_size)
 
-
+# %% 
 
 global_step = 0
 epochs = tqdm(range(args.num_train_epochs), desc="Epoch ... ", position=0)
@@ -427,11 +426,11 @@ for epoch in epochs:
     for batch in train_dataloader:
     # for batch in train_dataset:
         # Unless you are using a dataset or sampler that uses `drop_last` (which typically drops the last non-full batch of each worker's dataset replica), check if each batch is evenly divisible by the number of devices
-        # if len(batch["input_ids"]) % jax.device_count() != 0:
-        #     continue
+        if len(batch["input_ids"]) % jax.device_count() != 0:
+            continue
 
         # Reify each batch before passing to the training step (NOTE: assumes dataset is batched for num of devices and args.train_batch_size)
-        batch = jax.tree.map(lambda x: jax.device_get(x), batch)
+        # batch = jax.tree.map(lambda x: jax.device_get(x), batch)
         batch = shard(batch)
 
         '''

@@ -11,6 +11,7 @@ from flax.jax_utils import replicate
 from flax.training.common_utils import shard
 from  flax.serialization import to_bytes, from_bytes
 from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
+from diffusers.utils import make_image_grid
 from diffusers import FlaxStableDiffusionImg2ImgPipeline
 from diffusers import FlaxStableDiffusionInstructPix2PixPipeline
 from diffusers import FlaxStableDiffusionImg2ImgPipeline
@@ -26,8 +27,6 @@ def download_image(url):
 def create_key(seed=0):
     return jax.random.PRNGKey(seed)
 
-
-# pipeline, params = FlaxStableDiffusionImg2ImgPipeline.from_pretrained(
 pipeline, pipeline_params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
     # '../flax_models/instruct-pix2pix',
     # '../flax_models/stable-diffusion-v1-5',
@@ -36,9 +35,9 @@ pipeline, pipeline_params = FlaxStableDiffusionInstructPix2PixPipeline.from_pret
     safety_checker=None
 )
 
-load_non_ema_params = False # change if testing non-ema params
+LOAD_NON_EMA_PARAMS = False # change if testing non-ema params
 
-if load_non_ema_params:
+if LOAD_NON_EMA_PARAMS:
     params_path = './instruct-pix2pix-model/unet/non_ema.msgpack'
 
     # Load the EMA parameters from disk
@@ -51,7 +50,74 @@ if load_non_ema_params:
     # Update the pipeline params 
     pipeline_params['non_ema'] = non_ema_params
 
-# Otherwise, only the EMA parameters are saved to disk under the 'unet' key in the params dictionary
+    # Otherwise, only the EMA parameters are saved to disk under the 'unet' key in the params dictionary
+
+# %% 
+
+rng = create_key(1371)
+num_samples = jax.device_count()
+rng = jax.random.split(rng, jax.device_count())
+p_params = replicate(pipeline_params)
+
+def run_pipeline(prompt, image):
+    prompt_ids, processed_image = pipeline.prepare_inputs(
+        prompt=[prompt] * num_samples, image=[image] * num_samples
+    )
+
+    prompt_ids = shard(prompt_ids)
+    processed_image = shard(processed_image)
+
+    output = pipeline(
+        prompt_ids=prompt_ids,
+        image=processed_image,
+        params=p_params,
+        prng_seed=rng,
+        num_inference_steps=50,
+        guidance_scale=7.5,
+        image_guidance_scale=1.2,
+        height=512,
+        width=512,
+        jit=True, # include for img2img
+    ).images
+
+    output_images = pipeline.numpy_to_pil(np.asarray(output.reshape((num_samples,) + output.shape[-3:])))
+
+    # Grid plot images
+    return make_image_grid(output_images, rows=len(output_images)//4, cols=4)
+
+
+text_prompts = [
+    "Generate a cartoonized version of the image",
+    "turn him into a cyborg",
+    "wipe out the lake",
+    "make the mountains snowy",
+    "Swap sunflowers with roses",
+]
+image_prompts = [
+    "https://huggingface.co/datasets/sayakpaul/sample-datasets/resolve/main/test_pix2pix_4.png",
+    "https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png",
+    "https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg",
+    "https://wehco.media.clients.ellingtoncms.com/img/photos/2019/06/25/vangogh1_t800.png?90232451fbcadccc64a17de7521d859a8f88077d",
+]
+
+images = list(map(lambda x : download_image(x).resize((512,512)), image_prompts))
+
+
+
+# %%
+# cartoonized (0), cyborg(1), wipe out lake (2), snowy (3), swap with roses (4)
+# painting (0), mountains(1), sculpture (2), gogh(3) sunflowers(4)
+
+M, N = 1, 2 # text, image
+run_pipeline(text_prompts[M], images[N])
+
+
+# %% 
+# Cyborg 
+url = 'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
+image = download_image(url).resize((512, 512))
+prompt = 'turn him into a cyborg'
+prompt = 'Generate a cartoonized version of the image'
 
 # %% 
 # Snowy mountains
@@ -66,19 +132,11 @@ prompt = 'Generate a cartoonized version of the image'
 url='https://wehco.media.clients.ellingtoncms.com/img/photos/2019/06/25/vangogh1_t800.png?90232451fbcadccc64a17de7521d859a8f88077d'
 image = download_image(url).resize((512, 512))
 prompt = 'Swap sunflowers with roses'
+prompt = 'Generate a cartoonized version of the image'
 
 # %%
 
-# Cyborg 
-url = 'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
-image = download_image(url).resize((512, 512))
-prompt = 'Generate a cartoonized version of the image'
-prompt = 'turn him into a cyborg'
-
-
-# %% 
 # Run the pipeline
-
 rng = create_key(1371)
 num_samples = jax.device_count()
 rng = jax.random.split(rng, jax.device_count())
@@ -110,7 +168,13 @@ from diffusers.utils import make_image_grid
 make_image_grid(output_images, rows=len(output_images)//4, cols=4)
 
 
+
+
+
+
 # %%
+
+# Multi-prompt inference
 
 text_prompts = [
     "wipe out the lake",
@@ -131,6 +195,9 @@ image_prompts = [
     "https://wehco.media.clients.ellingtoncms.com/img/photos/2019/06/25/vangogh1_t800.png?90232451fbcadccc64a17de7521d859a8f88077d",
 ]
 
+
+
+# %% 
 def download_image(url):
     image = PIL.Image.open(requests.get(url, stream=True).raw)
     image = PIL.ImageOps.exif_transpose(image)
