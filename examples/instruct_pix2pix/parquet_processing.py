@@ -142,7 +142,7 @@ def collate_fn_jax(examples):
 
 
 # Initialize dataset and DataLoader
-dataset = ParquetDataset('data/', transform=train_transforms, tokenizer=tokenizer)
+dataset = ParquetDataset('~/data', transform=train_transforms, tokenizer=tokenizer)
 
 # dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=collate_fn_jax, drop_last=True)
 
