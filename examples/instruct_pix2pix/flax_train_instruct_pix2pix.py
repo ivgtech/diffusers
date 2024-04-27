@@ -41,7 +41,7 @@ from diffusers import (
 from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecker
 from diffusers.utils import check_min_version
 
-from jax_dataloader import NumpyLoader, train_dataset 
+# from jax_dataloader import NumpyLoader, train_dataset 
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
@@ -122,11 +122,30 @@ class Args:
 args = Args(**args)
 
 # (2) Data loader: Creates a JAX generator from a standard PyTorch dataloader
-train_dataloader = NumpyLoader(
-    train_dataset, 
-    batch_size=args.train_batch_size,
-    num_workers= 0
-)
+# train_dataloader = NumpyLoader(
+#     train_dataset, 
+#     batch_size=args.train_batch_size,
+#     num_workers= 0
+# )
+
+from parquet_processing import dataset as train_dataset
+from parquet_processing import collate_fn_jax
+from torch.utils.data import DataLoader, Subset
+
+def create_balanced_loader(dataset, batch_size, num_devices, shuffle=True):
+    # Calculate the number of samples to drop to make the dataset size divisible by (batch_size * num_devices)
+    total_size = len(dataset)
+    excess = total_size % (batch_size * num_devices)
+    if excess > 0:
+        dataset = Subset(dataset, indices=range(total_size - excess))
+    
+    # Create DataLoader
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn_jax, drop_last=True)
+
+num_devices = jax.local_device_count()  # Number of JAX devices
+batch_size = args.train_batch_size  # Choose a batch size that fits your memory and is suitable for your model
+total_batch_size = batch_size * num_devices  # Total batch size across all devices
+train_dataloader = DataLoader(train_dataset, batch_size=total_batch_size, shuffle=True, collate_fn=collate_fn_jax, drop_last=True)
 
 # (3) Helper functions
 def get_nparams(params: FrozenDict) -> int:
@@ -342,6 +361,7 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
         )
         latents = vae_outputs.latent_dist.sample(sample_rng)
         latents = jnp.einsum("ijkl->iljk", latents) * vae.config.scaling_factor  # (NHWC) -> (NCHW)
+        # latents = jnp.einsum("...hwc->...chw", latents) * vae.config.scaling_factor  # (NHWC) -> (NCHW)
         noise_rng, timestep_rng = jax.random.split(sample_rng)
 
         # Sample noise that we'll add to the latents
@@ -372,11 +392,32 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
             {"params": vae_params}, batch["original_pixel_values"], deterministic=True, method=vae.encode
         )
         original_image_embeds = vae_image_outputs.latent_dist.mode()
+        # original_image_embeds = jnp.einsum("...hwc->...chw", original_image_embeds) # (NHWC) -> (NCHW)
         original_image_embeds = jnp.einsum("ijkl->iljk", original_image_embeds) # (NHWC) -> (NCHW)
 
-        # TODO: Implement conditioning dropout
+        # Conditioning dropout to support classifier-free guidance during inference. For more details
+        # check out the section 3.2.1 of the original paper https://arxiv.org/abs/2211.09800.
+        def tokenize_captions(captions):
+            inputs = tokenizer(
+                captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="np")
+            return inputs.input_ids
 
-        # Concatenate the `original_image_embeds` with the `noisy_latents`.
+        # Conditional dropout for text embeddings
+        random_p = jax.random.uniform(dropout_rng, (bsz,), minval=0.0, maxval=1.0)
+        prompt_mask = random_p < 2 * args.conditioning_dropout_prob
+        # Get the text embedding for the null conditioning
+        null_conditioning = text_encoder(
+            tokenize_captions([""]),
+            params=text_encoder_params,
+            train=False,
+        )[0]
+        encoder_hidden_states = jax.numpy.where(prompt_mask[:, None, None], null_conditioning, encoder_hidden_states)
+        # Conditional dropout for image embeddings
+        image_mask = jax.numpy.logical_and(random_p >= args.conditioning_dropout_prob, random_p < 3 * args.conditioning_dropout_prob)
+        image_mask = image_mask[:, None, None, None]
+        original_image_embeds = image_mask * original_image_embeds
+
+        # Concatenate the noisy latents with the original image embeddings
         concatenated_noisy_latents = jnp.concatenate([noisy_latents, original_image_embeds], axis=1)
 
         # Predict the noise residual and compute loss
@@ -418,7 +459,7 @@ text_encoder_params = jax_utils.replicate(text_encoder.params)
 vae_params = jax_utils.replicate(vae_params)
 
 # Train!
-len_train_dataset =  train_dataloader.dataset_len
+len_train_dataset =  len(train_dataset)
 
 num_update_steps_per_epoch = math.ceil(len_train_dataset)
 
@@ -435,7 +476,7 @@ logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
 logger.info(f"  Total train batch size (w. parallel & distributed) = {total_train_batch_size}")
 logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
-# %%
+# %% 
 
 global_step = 0
 epochs = tqdm(range(args.num_train_epochs), desc="Epoch ... ", position=0)
