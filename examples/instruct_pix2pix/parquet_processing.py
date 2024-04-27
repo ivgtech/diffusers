@@ -1,14 +1,15 @@
 # %% 
 
+import io
 import os
+
 import jax
 import numpy as np
-from PIL import Image
-import io
 import pyarrow.parquet as pq
 import torch
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from torch.utils.data import Dataset, DataLoader
 from transformers import CLIPTokenizer
 
 # Assume the tokenizer is initialized here
@@ -20,7 +21,7 @@ class ParquetDataset(Dataset):
         self.transform = transform
         self.tokenizer = tokenizer
         self.resolution = resolution
-        self.file_paths = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.parquet')]
+        self.file_paths = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.parquet')][:1]
         self.dataframes = [pq.read_table(fp).to_pandas() for fp in self.file_paths]
         self.original = []
         self.edited   = []
