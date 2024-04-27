@@ -4,7 +4,7 @@ modified_*/
 instruct-pix2pix-model/
 pytorch_models/
 instruct_pix2pix_data/
-instruct-pix2pix-model-15k/
+instruct-pix2pix-model-*/
 data/
 *images/
 
