@@ -1,5 +1,4 @@
 # %%
-
 import requests
 from io import BytesIO
 from PIL import Image
@@ -10,13 +9,15 @@ from flax.jax_utils import replicate
 from flax.training.common_utils import shard
 from  flax.serialization import to_bytes, from_bytes
 from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
-from diffusers import FlaxStableDiffusionImg2ImgPipeline
-from diffusers import FlaxStableDiffusionInstructPix2PixPipeline
-from diffusers import FlaxStableDiffusionImg2ImgPipeline
+from diffusers.utils import make_image_grid
+from diffusers import (
+    FlaxStableDiffusionImg2ImgPipeline,
+    FlaxStableDiffusionInstructPix2PixPipeline,
+    FlaxStableDiffusionImg2ImgPipeline
+)
 
 from jax.experimental.compilation_cache import compilation_cache as cc
 cc.set_cache_dir("/tmp/sd_cache")
-
 
 def download_image(url):
     response = requests.get(url)
@@ -25,8 +26,6 @@ def download_image(url):
 def create_key(seed=0):
     return jax.random.PRNGKey(seed)
 
-
-# pipeline, params = FlaxStableDiffusionImg2ImgPipeline.from_pretrained(
 pipeline, pipeline_params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
     # '../flax_models/instruct-pix2pix',
     # '../flax_models/stable-diffusion-v1-5',
@@ -35,10 +34,9 @@ pipeline, pipeline_params = FlaxStableDiffusionInstructPix2PixPipeline.from_pret
     safety_checker=None
 )
 
-# %%
-load_non_ema_params = False # change if testing non-ema params
+LOAD_NON_EMA_PARAMS = False # change if testing non-ema params
 
-if load_non_ema_params:
+if LOAD_NON_EMA_PARAMS:
     params_path = './instruct-pix2pix-model/unet/non_ema.msgpack'
 
     # Load the EMA parameters from disk
@@ -51,80 +49,112 @@ if load_non_ema_params:
     # Update the pipeline params 
     pipeline_params['non_ema'] = non_ema_params
 
-# Otherwise, only the EMA parameters are saved to disk under the 'unet' key in the params dictionary
+    # Otherwise, only the EMA parameters are saved to disk under the 'unet' key in the params dictionary
 
-# %% 
-# Snowy mountains
-url='https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png'
-url='https://cdn-lfs.huggingface.co/repos/f6/ea/f6ea2d9b15ffdf0b3d41d9f1adcc2056323a844b3c37335563295a4ccd8bbe3d/7405e2013907463cb6e0c1a15bab847b3d2f982ec4bd8f33610962cd23c87624?response-content-disposition=inline%3B+filename*%3DUTF-8%27%27mountain.png%3B+filename%3D%22mountain.png%22%3B&response-content-type=image%2Fpng&Expires=1714197929&Policy=eyJTdGF0ZW1lbnQiOlt7IkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiQVdTOkVwb2NoVGltZSI6MTcxNDE5NzkyOX19LCJSZXNvdXJjZSI6Imh0dHBzOi8vY2RuLWxmcy5odWdnaW5nZmFjZS5jby9yZXBvcy9mNi9lYS9mNmVhMmQ5YjE1ZmZkZjBiM2Q0MWQ5ZjFhZGNjMjA1NjMyM2E4NDRiM2MzNzMzNTU2MzI5NWE0Y2NkOGJiZTNkLzc0MDVlMjAxMzkwNzQ2M2NiNmUwYzFhMTViYWI4NDdiM2QyZjk4MmVjNGJkOGYzMzYxMDk2MmNkMjNjODc2MjQ%7EcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj0qJnJlc3BvbnNlLWNvbnRlbnQtdHlwZT0qIn1dfQ__&Signature=G4E-9YqrNqqAR1Vcn3bnxy9KX4vopcFs9xMltX-8nb%7E0bRFxov-IL0nj-i2rvU0Ijxdx4foLXy0oQdysQQf2Dn%7ESiEVX8ONxy%7E9h-bsmsGscfo9cusZPZMpA5BUahtko-480cJApwJ39ohLhxRXQ7%7EqFCerCZ9qRZpV2hV87To%7EyHb7CGOjMKlxIgD1Wr103cTLmEKi8Bwc-FyeO1Nu9AA0ryOBjQgpkmKjFwup71TkGJHS3pmhG%7EmyD1mSx2iWSK3NQlnMce6-%7E1yQzp3N1go4t%7EqIfq0qxcAKOyGoVPjn5-O-s52xGQYZ%7EDjFfKP9uGA0zKMoC3V7B389-SiMptQ__&Key-Pair-Id=KVTP0A1DKRTAX'
-image = download_image(url).resize((512, 512))
-prompt = 'Generate a cartoonized version of the image'
-prompt = 'make the mountains snowy'
-
-# %% 
-# Sunflowers
-url='https://wehco.media.clients.ellingtoncms.com/img/photos/2019/06/25/vangogh1_t800.png?90232451fbcadccc64a17de7521d859a8f88077d'
-image = download_image(url).resize((512, 512))
-prompt = 'Swap sunflowers with roses'
-
-# %%
-
-# Cyborg 
-url = 'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
-image = download_image(url).resize((512, 512))
-prompt = 'Generate a cartoonized version of the image'
-prompt = 'turn him into cyborg'
-
-
-# %% 
-# Run the pipeline
 
 rng = create_key(1371)
 num_samples = jax.device_count()
 rng = jax.random.split(rng, jax.device_count())
-prompt_ids, processed_image = pipeline.prepare_inputs(
-    prompt=[prompt] * num_samples, image=[image] * num_samples
-)
-
 p_params = replicate(pipeline_params)
-prompt_ids = shard(prompt_ids)
-processed_image = shard(processed_image)
 
-output = pipeline(
-    prompt_ids=prompt_ids,
-    image=processed_image,
-    params=p_params,
-    prng_seed=rng,
-    num_inference_steps=50,
-    height=512,
-    width=512,
-    jit=True, # include for img2img
-).images
+NUM_INFERENCE_STEPS     = 50
+GUIDANCE_SCALE          = 7.5
+IMAGE_GUIDANCE_SCALE    = 1.5
 
-output_images = pipeline.numpy_to_pil(np.asarray(output.reshape((num_samples,) + output.shape[-3:])))
+def run_pipeline(prompt, image):
+    prompt_ids, processed_image = pipeline.prepare_inputs(
+        prompt=[prompt] * num_samples, image=[image] * num_samples
+    )
 
-# Grid plot images
-from diffusers.utils import make_image_grid
-make_image_grid(output_images, rows=len(output_images)//4, cols=4)
+    prompt_ids = shard(prompt_ids)
+    processed_image = shard(processed_image)
+    
+    output = pipeline(
+        prompt_ids=prompt_ids,
+        image=processed_image,
+        params=p_params,
+        prng_seed=rng,
+        num_inference_steps=NUM_INFERENCE_STEPS,
+        guidance_scale=GUIDANCE_SCALE,
+        image_guidance_scale=IMAGE_GUIDANCE_SCALE,
+        height=512,
+        width=512,
+        jit=True, # include for img2img
+    ).images
+
+    output_images = pipeline.numpy_to_pil(np.asarray(output.reshape((num_samples,) + output.shape[-3:])))
+
+    # Grid plot images
+    return make_image_grid(output_images, rows=len(output_images)//4, cols=4)
 
 
-# %%
+# Run pipeline with multiple prompts and images
+
+text_prompts = [
+    "wipe out the lake",
+    "make the mountains snowy",
+    "Generate a cartoonized version of the image",
+    "turn him into a cyborg",
+    "Generate a cartoonized version of the image",
+    "Swap sunflowers with roses",
+    "Generate a cartoonized version of the image",
+]
+urls = [
+    "https://huggingface.co/datasets/sayakpaul/sample-datasets/resolve/main/test_pix2pix_4.png",
+    "https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png",
+    "https://huggingface.co/datasets/diffusers/diffusers-images-docs/resolve/main/mountain.png",
+    "https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg",
+    "https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg",
+    "https://wehco.media.clients.ellingtoncms.com/img/photos/2019/06/25/vangogh1_t800.png?90232451fbcadccc64a17de7521d859a8f88077d",
+    "https://wehco.media.clients.ellingtoncms.com/img/photos/2019/06/25/vangogh1_t800.png?90232451fbcadccc64a17de7521d859a8f88077d",
+]
+
+image_prompts = list(map(lambda x : download_image(x).resize((512,512)), urls))
+images = []
+
+print(f'n-steps: {NUM_INFERENCE_STEPS}, guidance_scale: {GUIDANCE_SCALE}, image_guidance_scale: {IMAGE_GUIDANCE_SCALE}')
+
+for i in range(len(text_prompts)):
+    print(f"Running prompt {i}")
+    images.append(run_pipeline(text_prompts[i], image_prompts[i]))
+
+for i in range(len(images)):
+    images[i].show()
+    
+
+
+
+
+# # %% 
+# # Manual testing 
+
+
+# M, N = 1, 2 # text, image
+
+# run_pipeline(text_prompts[M], image_prompts[N])
+
+# # %%
+
+# # Inference with pretrained model from Hugging Face
+
 # import torch  
 # from diffusers import StableDiffusionInstructPix2PixPipeline
 # from diffusers import FlaxStableDiffusionInstructPix2PixPipeline
 
-# model_id = "timbrooks/instruct-pix2pix"
+# model_id = 'timbrooks/instruct-pix2pix'
+# image = Image.open(BytesIO(requests.get(
+#     'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
+#     ).content)).convert('RGB')
+
+# prompt='turn him into a cyborg'
 
 # pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-#      model_id, 
-#     torch_dtype=torch.float32, 
+#     model_id, 
+#     torch_dtype=torch.float32, #torch.float16 not supported
 #     safety_checker=None
 # )
 
-
 # images = pipe(prompt, image=image).images
 # images[0].show()
-
-
 
 # %%

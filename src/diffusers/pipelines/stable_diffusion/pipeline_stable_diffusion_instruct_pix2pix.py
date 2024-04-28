@@ -324,6 +324,10 @@ class StableDiffusionInstructPix2PixPipeline(
 
         device = self._execution_device
 
+
+
+        ########################### ***** Encode Prompt ***** ###########################
+
         # 2. Encode input prompt
         prompt_embeds = self._encode_prompt(
             prompt,
@@ -334,6 +338,9 @@ class StableDiffusionInstructPix2PixPipeline(
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
         )
+
+        ########################### ************************* ########################### 
+
 
         # 3. Preprocess image
         image = self.image_processor.preprocess(image)
@@ -389,6 +396,11 @@ class StableDiffusionInstructPix2PixPipeline(
         # 9. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
+
+        
+
+        ########################### ***** Start of Denoising Loop ***** ###########################
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # Expand the latents if we are doing classifier free guidance.
@@ -439,6 +451,18 @@ class StableDiffusionInstructPix2PixPipeline(
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
 
+
+        ########################### ***** end of denoising loop ***** ###########################
+
+
+
+
+
+
+
+
+
+
         if not output_type == "latent":
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
             image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
@@ -460,6 +484,12 @@ class StableDiffusionInstructPix2PixPipeline(
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+
+
+
+
+
+   ########################### ***** Start of Encode Prompt ***** ###########################
 
     def _encode_prompt(
         self,
@@ -609,6 +639,17 @@ class StableDiffusionInstructPix2PixPipeline(
             prompt_embeds = torch.cat([prompt_embeds, negative_prompt_embeds, negative_prompt_embeds])
 
         return prompt_embeds
+
+   ########################### ***** End Encode Prompt ***** ###########################
+
+
+
+
+
+
+
+
+
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_image
     def encode_image(self, image, device, num_images_per_prompt, output_hidden_states=None):

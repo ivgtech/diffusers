@@ -833,6 +833,9 @@ def main():
                 # Instead of getting a diagonal Gaussian here, we simply take the mode.
                 original_image_embeds = vae.encode(batch["original_pixel_values"].to(weight_dtype)).latent_dist.mode()
 
+
+                ####################################### ***** Conditioning Dropout ***** ####################################### 
+
                 # Conditioning dropout to support classifier-free guidance during inference. For more details
                 # check out the section 3.2.1 of the original paper https://arxiv.org/abs/2211.09800.
                 if args.conditioning_dropout_prob is not None:
@@ -853,6 +856,7 @@ def main():
                     image_mask = image_mask.reshape(bsz, 1, 1, 1)
                     # Final image conditioning.
                     original_image_embeds = image_mask * original_image_embeds
+                ####################################### ***** End of Conditioning Dropout ***** ####################################### 
 
                 # Concatenate the `original_image_embeds` with the `noisy_latents`.
                 concatenated_noisy_latents = torch.cat([noisy_latents, original_image_embeds], dim=1)

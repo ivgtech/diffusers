@@ -299,6 +299,8 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
+        ########################### ***** Start of Encode Prompt ***** ###########################
+
         # get prompt text embeddings
         prompt_embeds = self.text_encoder(prompt_ids, params=params["text_encoder"])[0]
 
@@ -323,6 +325,11 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
         context = jnp.concatenate([prompt_embeds, negative_prompt_embeds, negative_prompt_embeds ])
         #context = _encode_prompt(prompt_ids, 1, neg_prompt_ids) 
 
+        ########################### ***** End Encode Prompt ***** ###########################
+
+
+
+
         # Ensure model output will be `float32` before going into the scheduler
         # guidance_scale = jnp.array([guidance_scale], dtype=jnp.float32)
 
@@ -340,19 +347,21 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
             if latents.shape != latents_shape:
                 raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {latents_shape}")
 
-        # Create image latents
+        # 5. Prepare Image latents
         image_latents = self.prepare_image_latents(image, params, batch_size, 1, True, prng_seed)
         image_latents = image_latents.transpose((0, 3, 1, 2))
-        # Create init_latents
+
+        # 6. Prepare latent variables ( #prepare_latents )
         init_latent_dist = self.vae.apply({"params": params["vae"]}, image, method=self.vae.encode).latent_dist
         init_latents = init_latent_dist.sample(key=prng_seed).transpose((0, 3, 1, 2))
         init_latents = self.vae.config.scaling_factor * init_latents
 
+
+
+
+        ########################### ***** Start of Denoising Loop ***** ###########################
         def loop_body(step, args):
             latents, scheduler_state = args
-            # For classifier free guidance, we need to do two forward passes.
-            # Here we concatenate the unconditional and text embeddings into a single batch
-            # to avoid doing two forward passes
 
             # Expand the latents if we are doing classifier free guidance.
             # The latents are expanded 3 times because for pix2pix the guidance\
@@ -383,18 +392,25 @@ class FlaxStableDiffusionInstructPix2PixPipeline(FlaxDiffusionPipeline):
 
             noise_pred_text, noise_pred_image, noise_pred_uncond = jnp.split(noise_pred, 3, axis=0)
 
+            # perform guidance
             noise_pred = (
                 noise_pred_uncond
                 + guidance_scale * (noise_pred_text - noise_pred_image)
                 + image_guidance_scale * (noise_pred_image - noise_pred_uncond)
             )
-            # perform guidance
+
             # noise_pred_uncond, noise_prediction_text = jnp.split(noise_pred, 2, axis=0)
             # noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
             latents, scheduler_state = self.scheduler.step(scheduler_state, noise_pred, t, latents).to_tuple()
             return latents, scheduler_state
+
+
+
+            ########################### ***** end of denoising loop ***** ###########################
+
+
 
         # set the scheduler state
         scheduler_state = self.scheduler.set_timesteps(
