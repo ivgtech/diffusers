@@ -85,7 +85,7 @@ args = {
 'scale_lr': False,
 'lr_scheduler': 'constant',
 'lr_warmup_steps': 0,
-'conditioning_dropout_prob': 0.05,
+'conditioning_dropout_prob': 0.25,
 'use_8bit_adam': False,
 'allow_tf32': False,
 'use_ema': False,
@@ -146,7 +146,7 @@ train_dataloader = NumpyLoader(
 
 # (5) Conditioning dropout implementation
 
-
+# %% 
 def xapply_conditioning_dropout(encoder_hidden_states, original_image_embeds, dropout_rng, bsz, args):
     print("Encoder hidden states: ", encoder_hidden_states.shape, ' original_image_embeds.shape, ', original_image_embeds.shape, 'BSZ: ', bsz)
 
@@ -418,14 +418,16 @@ def get_decay(
 
     # Clip the decay to ensure it stays within the specified bounds
     return jnp.clip(decay, min_ema_decay, max_ema_decay)
-
+#     return jnp.clip(decay, min_ema_decay, max_ema_decay)
 
 @jax.jit
-def ema_update(params, ema_params, decay):
-    """
-    Updates the EMA parameters using the given model parameters and decay factor.
-    """
-    return jax.tree.map(lambda ema, p: ema * decay + p * (1 - decay), ema_params, params)
+def ema_update(new_params, ema_params, ema_decay):
+    # Update EMA parameters
+    # return jax.tree.map(lambda ema, p: ema * decay + p * (1 - decay), ema_params, params)
+    new_ema_params = jax.tree.map(
+        lambda ema, p: ema * ema_decay + (1 - ema_decay) * p, ema_params, new_params
+    )
+    return new_ema_params
 
 class ExtendedTrainState(TrainState):
     ema_params: core.FrozenDict[str, Any]
@@ -438,10 +440,11 @@ class ExtendedTrainState(TrainState):
 
         # Update EMA parameters using the decay function
         # decay = self.decay_fn(self.step)  # Using extended_get_decay
-        decay = get_decay(self.step)  # NOTE: set decay function here
-        new_ema_params = ema_update(new_params, self.ema_params, decay)
+        #decay = get_decay(self.step)  # NOTE: set decay function here
+        # new_ema_params = ema_update(new_params, self.ema_params, decay)
 
-        return self.replace(params=new_params, opt_state=new_opt_state, ema_params=new_ema_params)
+        return self.replace(params=new_params, opt_state=new_opt_state, ema_params=self.ema_params)
+
 
 # Initialize EMA params with original model params
 ema_params = copy.deepcopy(unet_params)
@@ -530,13 +533,10 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
     grad_fn = jax.value_and_grad(compute_loss)
     loss, grad = grad_fn(state.params)
     grad = jax.lax.pmean(grad, "batch")
-
-    ## new_state = state.apply_gradients(grads=grad)
-    
     # Update model parameters
     new_state = state.apply_gradients(grads=grad)
-
-    # Update EMA parameters using any decay function
+    
+    # Apply EMA update 
     decay = get_decay(state.step)
     new_ema_params = ema_update(new_state.params, state.ema_params, decay)
 

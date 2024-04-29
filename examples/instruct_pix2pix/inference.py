@@ -29,7 +29,10 @@ def create_key(seed=0):
 pipeline, pipeline_params = FlaxStableDiffusionInstructPix2PixPipeline.from_pretrained(
     # '../flax_models/instruct-pix2pix',
     # '../flax_models/stable-diffusion-v1-5',
-    './instruct-pix2pix-model', 
+    # './instruct-pix2pix-model-parquet',
+    # 'ema-and-05-dropout-instruct-pix2pix-model',
+     './instruct-pix2pix-model', 
+
     dtype=jnp.bfloat16,
     safety_checker=None
 )
