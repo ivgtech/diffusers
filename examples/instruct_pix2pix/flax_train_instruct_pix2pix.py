@@ -85,7 +85,7 @@ args = {
 'scale_lr': False,
 'lr_scheduler': 'constant',
 'lr_warmup_steps': 0,
-'conditioning_dropout_prob': 0.25,
+'conditioning_dropout_prob': 0.05,
 'use_8bit_adam': False,
 'allow_tf32': False,
 'use_ema': False,
