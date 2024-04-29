@@ -41,8 +41,9 @@ from diffusers import (
 from diffusers.pipelines.stable_diffusion import FlaxStableDiffusionSafetyChecker
 from diffusers.utils import check_min_version
 
-from jax_dataloader import NumpyLoader, train_dataset 
-
+from parquet_processing import dataset as train_dataset
+from parquet_processing import collate_fn_jax
+from torch.utils.data import DataLoader, Subset
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.28.0.dev0")
@@ -135,94 +136,28 @@ else:
 
 if args.seed is not None: set_seed(args.seed)
 
+# (1) Helper functions
 
-# (1) Data loader: Creates a JAX generator from a standard PyTorch dataloader
-train_dataloader = NumpyLoader(
-    train_dataset, 
-    batch_size=args.train_batch_size,
-    num_workers= 0
-)
+def get_nparams(params: FrozenDict) -> int:
+    nparams = 0
+    for item in params:
+        if isinstance(params[item], FrozenDict) or isinstance(params[item], dict):
+            nparams += get_nparams(params[item])
+        else:
+            nparams += params[item].size
+    return nparams
 
 
-# (5) Conditioning dropout implementation
+# (2) Data loader: Creates a JAX generator from a standard PyTorch dataloader
 
-# %% 
-def xapply_conditioning_dropout(encoder_hidden_states, original_image_embeds, dropout_rng, bsz, args):
-    print("Encoder hidden states: ", encoder_hidden_states.shape, ' original_image_embeds.shape, ', original_image_embeds.shape, 'BSZ: ', bsz)
-
-    # Make sure bsz is a static, concrete number
-    random_p = jax.random.uniform(dropout_rng, shape=(bsz,), minval=0.0, maxval=1.0)
-
-    print("Random p: ", random_p, random_p.shape)
-
-    prompt_mask = random_p < 2 * args.conditioning_dropout_prob
-
-    print("Prompt mask: ", prompt_mask, prompt_mask.shape)
-    print('Tokenize captions: ', tokenize_captions([""]).shape)
-
-    null_text_conditioning = text_encoder(tokenize_captions([""]), params=text_encoder.params, train=False)[0]
-
-    print("Null text conditioning: ", null_text_conditioning.shape)
-    print(prompt_mask[:, None, None].shape, null_text_conditioning.shape, encoder_hidden_states.shape   )
-
-    encoder_hidden_states = jnp.where(prompt_mask[:, None, None], null_text_conditioning, encoder_hidden_states)
-
-    print("Encoder hidden states: ", encoder_hidden_states.shape)
-
-    image_mask = (random_p >= args.conditioning_dropout_prob) & (random_p < 3 * args.conditioning_dropout_prob)
-
-    print("Image mask: ", image_mask, image_mask.shape)
-
-    image_mask = image_mask[:, None, None, None]  # Adjust the mask shape to match the embeddings shape
-
-    print("Image mask: ", image_mask, image_mask.shape) 
-
-    original_image_embeds = original_image_embeds * image_mask
-    print("Original image embeds: ",original_image_embeds.shape)
-
-    return encoder_hidden_states, original_image_embeds
-
-def tokenize_captions(captions):
-    inputs = tokenizer(
-        captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="np")
-    return inputs.input_ids
-
-def apply_conditioning_dropout(encoder_hidden_states, original_image_embeds, dropout_rng, bsz, args):
-
-    # Make sure bsz is a static, concrete number
-    # Generating a random tensor `random_p` with shape (bsz,)
-    random_p = jax.random.uniform(dropout_rng , (bsz,))
-
-    # Generating the prompt mask
-    prompt_mask = random_p < 2 * args.conditioning_dropout_prob
-    prompt_mask = prompt_mask.reshape(bsz, 1, 1)  # Reshape to match dimensions for broadcasting
-    null_text_conditioning = text_encoder(tokenize_captions([""]), params=text_encoder.params, train=False)[0]
-
-    # Applying null conditioning using the prompt mask
-    updated_encoder_hidden_states = jnp.where(prompt_mask, null_text_conditioning, encoder_hidden_states)
-
-    # Generating the image mask
-    image_mask_dtype = original_image_embeds.dtype
-    image_mask = 1 - (
-        (random_p >= args.conditioning_dropout_prob).astype(image_mask_dtype)
-        * (random_p < 3 * args.conditioning_dropout_prob).astype(image_mask_dtype)
-    )
-    image_mask = image_mask.reshape(bsz, 1, 1, 1)
-    
-    # Final image conditioning.
-    original_image_embeds = image_mask * original_image_embeds
-    
-    return updated_encoder_hidden_states, original_image_embeds
-
-# apply_conditioning_dropout(jnp.ones((4,77,768)), jnp.ones((4,4,32,32)), jax.random.PRNGKey(42), 4, args);
+num_devices = jax.local_device_count()  # Number of JAX devices
+batch_size = args.train_batch_size  # Choose a batch size that fits your memory and is suitable for your model
+total_batch_size = batch_size * num_devices  # Total batch size across all devices
+train_dataloader = DataLoader(train_dataset, batch_size=total_batch_size, shuffle=True, collate_fn=collate_fn_jax, drop_last=True)
 
 
 
-
-
-
-
-# (2) Models and state
+# (3) Models and state
 
 weight_dtype = jnp.float32
 if args.mixed_precision == "fp16":
@@ -275,159 +210,8 @@ unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(
 )
 
 
-# (3) Helper functions
 
-def get_nparams(params: FrozenDict) -> int:
-    nparams = 0
-    for item in params:
-        if isinstance(params[item], FrozenDict) or isinstance(params[item], dict):
-            nparams += get_nparams(params[item])
-        else:
-            nparams += params[item].size
-    return nparams
-
-def retrieve_latents_jax(image, vae, vae_params, key=None, sample_mode="sample"):
-    # pass the image through the VAE to get the latents
-    encoder_output = vae.apply(
-                {"params": vae_params}, image, deterministic=True, method=vae.encode)
-
-    # get the latent distribution
-    latent_dist = encoder_output.latent_dist 
-
-    if sample_mode == "sample":
-        return latent_dist.sample(key)
-    elif sample_mode == "argmax":
-        return latent_dist.mode()
-    elif sample_mode == "latents":
-        return encoder_output.latents
-    else:
-        raise ValueError(f"Invalid sample_mode: {sample_mode}")
-
-
-# (4) EMA implementation
-
-# def get_decay(
-#     step: int, max_ema_decay: float = 0.9999,
-#     min_ema_decay: float = 0.0,
-#     ema_inv_gamma: float = 1.0,
-#     ema_decay_power: float = 2 / 3, 
-#     use_ema_warmup: bool = False,
-#     start_ema_update_after_n_steps: float = 10.0
-#     ):
-#     # Adjust step to consider the start update offset
-#     adjusted_step = jnp.maximum(step - start_ema_update_after_n_steps, 0)
-
-#     # Compute base decay
-#     if use_ema_warmup:
-#         decay = 1.0 - (1.0 + adjusted_step / ema_inv_gamma) ** -ema_decay_power
-#     else:
-#         initial_steps = jnp.where(start_ema_update_after_n_steps == 0, 10.0, start_ema_update_after_n_steps)
-#         decay = (1.0 + adjusted_step) / (initial_steps + adjusted_step)
-
-#     # Ensure decay starts changing only after certain steps
-#     decay = jnp.where(step > start_ema_update_after_n_steps, decay, min_ema_decay)
-
-#     # Clip the decay to ensure it stays within the specified bounds
-#     return jnp.clip(decay, min_ema_decay, max_ema_decay)
-
-# class EMAState(struct.PyTreeNode):
-#     ema_params: core.FrozenDict[str, Any] = struct.field(pytree_node=True)
-#     # add a decay function to the EMAState
-#     decay_fn: Callable[[float], "EMAState"] = struct.field(pytree_node=False)
-
-# class ExtendedTrainState(TrainState, EMAState):
-#     def apply_gradients(self, grads: core.FrozenDict[str, Any], ema_decay: float = 0.999) -> "ExtendedTrainState":
-#         # Standard parameter update
-#         updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
-#         new_params = optax.apply_updates(self.params, updates)
-        
-#         ema_decay = self.decay_fn( self.step,) 
-
-#         # Update EMA parameters
-#         new_ema_params = jax.tree.map(
-#             lambda ema, p: ema * ema_decay + (1 - ema_decay) * p, self.ema_params, new_params
-#         )
-        
-#         return self.replace(params=new_params, opt_state=new_opt_state, ema_params=new_ema_params)
-
-
-
-
-#def main():
-
-
-# Optimization
-
-total_train_batch_size = args.train_batch_size * jax.local_device_count()
-if args.scale_lr:
-    args.learning_rate = args.learning_rate * total_train_batch_size
-
-constant_scheduler = optax.constant_schedule(args.learning_rate)
-
-adamw = optax.adamw(
-    learning_rate=constant_scheduler,
-    b1=args.adam_beta1,
-    b2=args.adam_beta2,
-    eps=args.adam_epsilon,
-    weight_decay=args.adam_weight_decay,
-)
-
-optimizer = optax.chain(
-    optax.clip_by_global_norm(args.max_grad_norm),
-    adamw,
-)
-
-print("Number of unet parameters: ", get_nparams(unet_params))
-
-# # Initialize EMA params with original model params
-# ema_params = copy.deepcopy(unet_params)
-# print("Number of EMA parameters: ", get_nparams(ema_params))
-
-# Prepare optimizer and state, including EMA parameters
-# state = train_state.TrainState.create(apply_fn=unet.__call__, params=unet_params, tx=optimizer)
-# state = ExtendedTrainState.create(apply_fn=unet.__call__, params=unet_params, ema_params=ema_params, decay_fn=get_decay, tx=optimizer)
-
-# Simplified decay function (matching PyTorch's EMAModel)
-def get_decay(step: int, decay: float = 0.9999):
-    return decay
-
-# Extended decay function 
-def get_decay(
-    step: int, max_ema_decay: float = 0.9999,
-    min_ema_decay: float = 0.0,
-    ema_inv_gamma: float = 1.0,
-    ema_decay_power: float = 2 / 3, 
-    use_ema_warmup: bool = False,
-    start_ema_update_after_n_steps: float = 10.0
-    ):
-    """
-    Computes the EMA decay factor based on the current step and a dynamic decay rate.
-    """
-    # Adjust step to consider the start update offset
-    adjusted_step = jnp.maximum(step - start_ema_update_after_n_steps, 0)
-
-    # Compute base decay
-    if use_ema_warmup:
-        decay = 1.0 - (1.0 + adjusted_step / ema_inv_gamma) ** -ema_decay_power
-    else:
-        initial_steps = jnp.where(start_ema_update_after_n_steps == 0, 10.0, start_ema_update_after_n_steps)
-        decay = (1.0 + adjusted_step) / (initial_steps + adjusted_step)
-
-    # Ensure decay starts changing only after certain steps
-    decay = jnp.where(step > start_ema_update_after_n_steps, decay, min_ema_decay)
-
-    # Clip the decay to ensure it stays within the specified bounds
-    return jnp.clip(decay, min_ema_decay, max_ema_decay)
-#     return jnp.clip(decay, min_ema_decay, max_ema_decay)
-
-@jax.jit
-def ema_update(new_params, ema_params, ema_decay):
-    # Update EMA parameters
-    # return jax.tree.map(lambda ema, p: ema * decay + p * (1 - decay), ema_params, params)
-    new_ema_params = jax.tree.map(
-        lambda ema, p: ema * ema_decay + (1 - ema_decay) * p, ema_params, new_params
-    )
-    return new_ema_params
+# (4) EMA Update implementation
 
 class ExtendedTrainState(TrainState):
     ema_params: core.FrozenDict[str, Any]
@@ -444,6 +228,109 @@ class ExtendedTrainState(TrainState):
         # new_ema_params = ema_update(new_params, self.ema_params, decay)
 
         return self.replace(params=new_params, opt_state=new_opt_state, ema_params=self.ema_params)
+
+
+def get_decay(
+    step: int, max_ema_decay: float = 0.9999,
+    min_ema_decay: float = 0.0,
+    ema_inv_gamma: float = 1.0,
+    ema_decay_power: float = 2 / 3, 
+    use_ema_warmup: bool = False,
+    start_ema_update_after_n_steps: float = 10.0
+    ):
+    # Computes the EMA decay factor based on the current step and a dynamic decay rate.
+    # Adjust step to consider the start update offset
+    adjusted_step = jnp.maximum(step - start_ema_update_after_n_steps, 0)
+
+    # Compute base decay
+    if use_ema_warmup:
+        decay = 1.0 - (1.0 + adjusted_step / ema_inv_gamma) ** -ema_decay_power
+    else:
+        initial_steps = jnp.where(start_ema_update_after_n_steps == 0, 10.0, start_ema_update_after_n_steps)
+        decay = (1.0 + adjusted_step) / (initial_steps + adjusted_step)
+
+    # Ensure decay starts changing only after certain steps
+    decay = jnp.where(step > start_ema_update_after_n_steps, decay, min_ema_decay)
+
+    # Clip the decay to ensure it stays within the specified bounds
+    return jnp.clip(decay, min_ema_decay, max_ema_decay)
+
+# jit as we will be calling this function inside the training loop and JAX can optimize it but also
+# to ensure that the function is compiled only once and not on every call
+@jax.jit
+def ema_update(new_params, ema_params, ema_decay):
+    # Update EMA parameters
+    # return jax.tree.map(lambda ema, p: ema * decay + p * (1 - decay), ema_params, params)
+    new_ema_params = jax.tree.map(
+        lambda ema, p: ema * ema_decay + (1 - ema_decay) * p, ema_params, new_params
+    )
+    return new_ema_params
+
+
+
+# (5) Conditioning dropout implementation
+
+def tokenize_captions(captions):
+    inputs = tokenizer(
+        captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="np")
+    return inputs.input_ids
+
+def apply_conditioning_dropout(encoder_hidden_states, original_image_embeds, dropout_rng, bsz, args):
+    # Make sure bsz is a static, concrete number
+    # Generating a random tensor `random_p` with shape (bsz,)
+    random_p = jax.random.uniform(dropout_rng , (bsz,))
+
+    # Generating the prompt mask
+    prompt_mask = random_p < 2 * args.conditioning_dropout_prob
+    prompt_mask = prompt_mask.reshape(bsz, 1, 1)  # Reshape to match dimensions for broadcasting
+    null_text_conditioning = text_encoder(tokenize_captions([""]), params=text_encoder.params, train=False)[0]
+
+    # Applying null conditioning using the prompt mask
+    updated_encoder_hidden_states = jnp.where(prompt_mask, null_text_conditioning, encoder_hidden_states)
+
+    # Generating the image mask
+    image_mask_dtype = original_image_embeds.dtype
+    image_mask = 1 - (
+        (random_p >= args.conditioning_dropout_prob).astype(image_mask_dtype)
+        * (random_p < 3 * args.conditioning_dropout_prob).astype(image_mask_dtype)
+    )
+    image_mask = image_mask.reshape(bsz, 1, 1, 1)
+    
+    # Final image conditioning.
+    original_image_embeds = image_mask * original_image_embeds
+    
+    return updated_encoder_hidden_states, original_image_embeds
+
+
+
+
+
+
+#def main():
+
+# Total train batch size across all global devices
+total_train_batch_size = args.train_batch_size * jax.local_device_count()
+if args.scale_lr:
+    args.learning_rate = args.learning_rate * total_train_batch_size
+
+# Learning rate scheduler
+constant_scheduler = optax.constant_schedule(args.learning_rate)
+
+# Optimizer
+adamw = optax.adamw(
+    learning_rate=constant_scheduler,
+    b1=args.adam_beta1,
+    b2=args.adam_beta2,
+    eps=args.adam_epsilon,
+    weight_decay=args.adam_weight_decay,
+)
+
+optimizer = optax.chain(
+    optax.clip_by_global_norm(args.max_grad_norm),
+    adamw,
+)
+
+
 
 
 # Initialize EMA params with original model params
@@ -506,7 +393,7 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
         original_image_embeds = vae_image_outputs.latent_dist.mode()
         original_image_embeds = jnp.einsum("ijkl->iljk", original_image_embeds) # (NHWC) -> (NCHW)
 
-        # TODO: Classifier-Free Guidance (conditioning dropout)
+        # (7) Classifier-Free Guidance (conditioning dropout)
         encoder_hidden_states, original_image_embeds = apply_conditioning_dropout(encoder_hidden_states, original_image_embeds, dropout_rng, bsz, args)
 
         # Concatenate the noisy latents with the original image embeddings
@@ -531,20 +418,27 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
         return loss
 
     grad_fn = jax.value_and_grad(compute_loss)
+
+    # Backprop to get gradients
     loss, grad = grad_fn(state.params)
+    
+    # behind the scenes JAX does the allreduce for us here 
     grad = jax.lax.pmean(grad, "batch")
-    # Update model parameters
+
+    # update weights by taking a step in the direction of the gradient
     new_state = state.apply_gradients(grads=grad)
     
-    # Apply EMA update 
+    # (8) Decay rate for current step
     decay = get_decay(state.step)
+    # (9) EMA update
     new_ema_params = ema_update(new_state.params, state.ema_params, decay)
-
     new_state = new_state.replace(ema_params=new_ema_params) 
 
     metrics = {"loss": loss}
+    # behind the scenes JAX does the allreduce for us here
     metrics = jax.lax.pmean(metrics, axis_name="batch")
 
+    # finally return the new state, metrics and the new random number generator
     return new_state, metrics, new_train_rng
 
 
@@ -557,13 +451,14 @@ text_encoder_params = jax_utils.replicate(text_encoder.params)
 vae_params = jax_utils.replicate(vae_params)
 
 # Train!
-len_train_dataset =  train_dataloader.dataset_len
+len_train_dataset =  len(train_dataset)
 
 num_update_steps_per_epoch = math.ceil(len_train_dataset)
 
 # Scheduler and math around the number of training steps.
 if args.max_train_steps is None:
     args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+
 
 #args.max_train_steps = math.ceil(args.max_train_steps*(4/total_train_batch_size))
 args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
@@ -573,6 +468,7 @@ logger.info(f"  Num Epochs = {args.num_train_epochs}")
 logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
 logger.info(f"  Total train batch size (w. parallel & distributed) = {total_train_batch_size}")
 logger.info(f"  Total optimization steps = {args.max_train_steps}")
+logger.info(f"  Num unet parameters = {get_nparams(unet_params)}")
 
 
 

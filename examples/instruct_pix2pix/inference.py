@@ -60,9 +60,10 @@ num_samples = jax.device_count()
 rng = jax.random.split(rng, jax.device_count())
 p_params = replicate(pipeline_params)
 
-NUM_INFERENCE_STEPS     = 50
-GUIDANCE_SCALE          = 7.5
-IMAGE_GUIDANCE_SCALE    = 1.5
+# Defaults are: 50, 7.5, 1.5(image guidance)
+NUM_INFERENCE_STEPS     = 20
+GUIDANCE_SCALE          = 6.67
+IMAGE_GUIDANCE_SCALE    = 0.03
 
 def run_pipeline(prompt, image):
     prompt_ids, processed_image = pipeline.prepare_inputs(
@@ -124,40 +125,3 @@ for i in range(len(text_prompts)):
 for i in range(len(images)):
     images[i].show()
     
-
-
-
-
-# # %% 
-# # Manual testing 
-
-
-# M, N = 1, 2 # text, image
-
-# run_pipeline(text_prompts[M], image_prompts[N])
-
-# # %%
-
-# # Inference with pretrained model from Hugging Face
-
-# import torch  
-# from diffusers import StableDiffusionInstructPix2PixPipeline
-# from diffusers import FlaxStableDiffusionInstructPix2PixPipeline
-
-# model_id = 'timbrooks/instruct-pix2pix'
-# image = Image.open(BytesIO(requests.get(
-#     'https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg'
-#     ).content)).convert('RGB')
-
-# prompt='turn him into a cyborg'
-
-# pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-#     model_id, 
-#     torch_dtype=torch.float32, #torch.float16 not supported
-#     safety_checker=None
-# )
-
-# images = pipe(prompt, image=image).images
-# images[0].show()
-
-# %%
