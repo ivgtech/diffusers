@@ -46,9 +46,6 @@ from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPImageProcessor, CLIPTokenizer, FlaxCLIPTextModel, set_seed
 
-from parquet_dataset import collate_fn_jax
-from parquet_dataset import dataset as train_dataset
-
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.28.0.dev0")
 
@@ -93,21 +90,21 @@ args = {
     "num_validation_images": 4,
     "validation_epochs": 1,
     "max_train_samples": None,
-    "output_dir": "/home/v/april30-instruct-pix2pix-model",
+    "output_dir": "april30-instruct-pix2pix-model/",
     "cache_dir": None,
     "seed": 42,
     "resolution": 4,
     "center_crop": False,
     "random_flip": True,
-    "train_batch_size": 16,
-    "num_train_epochs": 100,
-    "max_train_steps": 400,
+    "train_batch_size": 16,  # default: 16
+    "num_train_epochs": 100,  # default: 100
+    "max_train_steps": 15000,  # default: 15000
     "gradient_accumulation_steps": 4,
     "gradient_checkpointing": True,
     "learning_rate": 5e-05,
     "scale_lr": False,
     "lr_scheduler": "constant",
-    "lr_warmup_steps": 0,
+    "lr_warmup_steps": 500,
     "conditioning_dropout_prob": 0.05,
     "use_8bit_adam": False,
     "allow_tf32": False,
@@ -130,7 +127,7 @@ args = {
     "mixed_precision": "bf16",
     "report_to": "wandb",  # "tensorboard",
     "local_rank": -1,
-    "checkpointing_steps": 1000,
+    "checkpointing_steps": 5000,  # default: 500
     "checkpoints_total_limit": 1,
     "resume_from_checkpoint": None,
     "enable_xformers_memory_efficient_attention": True,
@@ -192,21 +189,38 @@ def get_nparams(params: FrozenDict) -> int:
     return nparams
 
 
-# (2) Data loader: Creates a JAX generator from a standard PyTorch dataloader
+# (2) Data loader setup
 
-num_devices = jax.local_device_count()  # Number of JAX devices
+num_devices = jax.local_device_count()
 batch_size = (
     args.train_batch_size
 )  # Choose a batch size that fits your memory and is suitable for your model
-
 total_batch_size = batch_size * num_devices  # Total batch size across all devices
-train_dataloader = DataLoader(
-    train_dataset,
-    batch_size=total_batch_size,
-    shuffle=True,
-    collate_fn=collate_fn_jax,
-    drop_last=True,
+
+# We have three options for data loading:
+# A. Load the data from the Hugging Face datasets library (no streaming)
+# B. Load the data from the Hugging Face datasets library using streaming
+# in both cases we use the JAX NumPyLoader:
+from jax_dataloader import NumpyLoader, train_dataset
+
+# Create a JAX generator from a PyTorch DataLoader
+train_dataloader = NumpyLoader(
+    train_dataset, batch_size=args.train_batch_size, num_workers=0
 )
+
+# C. Load the data from locally stored files (parquet files)
+# in which case we use the ParquetDataset and DataLoader:
+# from parquet_dataset import collate_fn_jax
+# from parquet_dataset import dataset as train_dataset
+
+# train_dataloader = DataLoader(
+#     train_dataset,
+#     batch_size=total_batch_size,
+#     shuffle=True,
+#     collate_fn=collate_fn_jax,
+#     drop_last=True,
+# )
+
 
 # (3) Models and state
 

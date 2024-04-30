@@ -4,7 +4,7 @@ import math
 import os
 import sys
 import random
-import requests 
+import requests
 from pathlib import Path
 import PIL
 from PIL import Image
@@ -46,15 +46,25 @@ check_min_version("0.28.0.dev0")
 logger = logging.getLogger(__name__)
 
 DATASET_NAME_MAPPING = {
-    "fusing/instructpix2pix-1000-samples": ("input_image", "edit_prompt", "edited_image"),
-    "timbrooks/instructpix2pix-clip-filtered": ("original_image", "edit_prompt", "edited_image"),
+    "fusing/instructpix2pix-1000-samples": (
+        "input_image",
+        "edit_prompt",
+        "edited_image",
+    ),
+    "timbrooks/instructpix2pix-clip-filtered": (
+        "original_image",
+        "edit_prompt",
+        "edited_image",
+    ),
 }
 
 WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
 
-class Args():
+
+class Args:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
+
 
 args = {
     "pretrained_model_name_or_path": "timbrooks/instruct-pix2pix",
@@ -77,7 +87,7 @@ args = {
     "report_to": "wandb",
     "hub_token": None,
     "seed": 42,
-    "streaming": False
+    "streaming": False,
 }
 
 args = Args(**args)
@@ -86,7 +96,7 @@ args = Args(**args)
 if args.dataset_name == "timbrooks/instructpix2pix-clip-filtered":
     args.streaming = True
 else:
-    args.streaming= False
+    args.streaming = False
 
 # Set column names for the dataset.
 if args.dataset_name == "timbrooks/instructpix2pix-clip-filtered":
@@ -120,11 +130,13 @@ def convert_to_np(image, resolution):
     image = image.convert("RGB").resize((resolution, resolution))
     return np.array(image).transpose(2, 0, 1)
 
+
 def numpy_to_pil(images):
     #  from src/diffusers/pipelines/pipeline_flax_utils.py
-    if images.ndim == 3: images = images[None, ...]
+    if images.ndim == 3:
+        images = images[None, ...]
     images = (images * 255).round().astype("uint8")
-    if images.shape[-1] == 1: # special case for grayscale (single channel) images
+    if images.shape[-1] == 1:  # special case for grayscale (single channel) images
         pil_images = [Image.fromarray(image.squeeze(), mode="L") for image in images]
     else:
         pil_images = [Image.fromarray(image) for image in images]
@@ -139,10 +151,12 @@ def download_image(url):
 
 
 ################################################################################################
-# Data loaders 
+# Data loaders
 ################################################################################################
 
-tokenizer = CLIPTokenizer.from_pretrained("timbrooks/instruct-pix2pix", subfolder='tokenizer', dtype=jnp.bfloat16)
+tokenizer = CLIPTokenizer.from_pretrained(
+    "timbrooks/instruct-pix2pix", subfolder="tokenizer", dtype=jnp.bfloat16
+)
 # tokenizer = CLIPTokenizer.from_pretrained('../flax_models/instruct-pix2pix/tokenizer/')
 
 
@@ -181,7 +195,9 @@ dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
 
 
 if args.original_image_column is None:
-    original_image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
+    original_image_column = (
+        dataset_columns[0] if dataset_columns is not None else column_names[0]
+    )
 else:
     original_image_column = args.original_image_column
     if original_image_column not in column_names:
@@ -189,7 +205,9 @@ else:
             f"--original_image_column' value '{args.original_image_column}' needs to be one of: {', '.join(column_names)}"
         )
 if args.edit_prompt_column is None:
-    edit_prompt_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
+    edit_prompt_column = (
+        dataset_columns[1] if dataset_columns is not None else column_names[1]
+    )
 else:
     edit_prompt_column = args.edit_prompt_column
     if edit_prompt_column not in column_names:
@@ -197,7 +215,9 @@ else:
             f"--edit_prompt_column' value '{args.edit_prompt_column}' needs to be one of: {', '.join(column_names)}"
         )
 if args.edited_image_column is None:
-    edited_image_column = dataset_columns[2] if dataset_columns is not None else column_names[2]
+    edited_image_column = (
+        dataset_columns[2] if dataset_columns is not None else column_names[2]
+    )
 else:
     edited_image_column = args.edited_image_column
     if edited_image_column not in column_names:
@@ -206,29 +226,48 @@ else:
         )
 
 
-
 # Preprocessing the datasets.
 # We need to tokenize input captions and transform the images.
 def tokenize_captions(captions):
     inputs = tokenizer(
-        captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
+        captions,
+        max_length=tokenizer.model_max_length,
+        padding="max_length",
+        truncation=True,
+        return_tensors="pt",
     )
     return inputs.input_ids
+
 
 # Preprocessing the datasets.
 train_transforms = transforms.Compose(
     [
-        transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
-        transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
+        (
+            transforms.CenterCrop(args.resolution)
+            if args.center_crop
+            else transforms.RandomCrop(args.resolution)
+        ),
+        (
+            transforms.RandomHorizontalFlip()
+            if args.random_flip
+            else transforms.Lambda(lambda x: x)
+        ),
     ]
 )
 
+
 def preprocess_images(examples):
     original_images = np.concatenate(
-        [convert_to_np(image, args.resolution) for image in examples[original_image_column]]
+        [
+            convert_to_np(image, args.resolution)
+            for image in examples[original_image_column]
+        ]
     )
     edited_images = np.concatenate(
-        [convert_to_np(image, args.resolution) for image in examples[edited_image_column]]
+        [
+            convert_to_np(image, args.resolution)
+            for image in examples[edited_image_column]
+        ]
     )
     # We need to ensure that the original and the edited images undergo the same
     # augmentation transforms.
@@ -236,6 +275,7 @@ def preprocess_images(examples):
     images = torch.tensor(images)
     images = 2 * (images / 255) - 1
     return train_transforms(images)
+
 
 def preprocess_train(examples):
     # Preprocess images.
@@ -256,8 +296,11 @@ def preprocess_train(examples):
     examples["input_ids"] = tokenize_captions(captions)
     return examples
 
+
 if args.max_train_samples is not None and args.streaming == False:
-    dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
+    dataset["train"] = (
+        dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
+    )
 
 
 # Set the training transforms
@@ -265,27 +308,28 @@ if not args.streaming:
     train_dataset = dataset["train"].with_transform(preprocess_train)
 else:
 
-    shuffled_train_dataset = dataset["train"].shuffle(seed=args.seed,  buffer_size=100)
+    shuffled_train_dataset = dataset["train"].shuffle(seed=args.seed, buffer_size=100)
     # use map to apply the preprocessing function to the dataset
     train_dataset = shuffled_train_dataset.map(preprocess_train, batched=True)
 
 
-
-
-
-
 ################################################################################################
-# Jax data loaders 
+# Jax data loaders
 ################################################################################################
 
-# Data loaders 
+
+# Data loaders
 def collate_fn_jax(examples):
-    np_original_pixel_values = np.stack([example["original_pixel_values"] for example in examples]).astype(np.float32)
-    np_edited_pixel_values = np.stack([example["edited_pixel_values"] for example in examples]).astype(np.float32)
+    np_original_pixel_values = np.stack(
+        [example["original_pixel_values"] for example in examples]
+    ).astype(np.float32)
+    np_edited_pixel_values = np.stack(
+        [example["edited_pixel_values"] for example in examples]
+    ).astype(np.float32)
     np_input_ids = np.stack([example["input_ids"] for example in examples])
 
     # Move data to accelerator
-    original_pixel_values  = jax.device_put(np_original_pixel_values)
+    original_pixel_values = jax.device_put(np_original_pixel_values)
     edited_pixel_values = jax.device_put(np_edited_pixel_values)
     input_ids = jax.device_put(np_input_ids)
 
@@ -310,7 +354,7 @@ class NumpyLoader(data.DataLoader):
         timeout=0,
         worker_init_fn=None,
         collate_fn=None,
-        ):
+    ):
         super(self.__class__, self).__init__(
             dataset,
             batch_size=batch_size,
@@ -322,21 +366,22 @@ class NumpyLoader(data.DataLoader):
             drop_last=drop_last,
             timeout=timeout,
             worker_init_fn=worker_init_fn,
-            collate_fn=collate_fn_jax
-            )
+            collate_fn=collate_fn_jax,
+        )
 
         from datasets import IterableDataset
+
         if isinstance(dataset, IterableDataset):
-            self.dataset_len =  self.dataset.info.splits['train'].num_examples
+            self.dataset_len = self.dataset.info.splits["train"].num_examples
         else:
             self.dataset_len = len(self.dataset)
-            
+
 
 def plot_batch(sample, tokenizer):
-    '''
+    """
     dict_keys(['original_pixel_values', 'edited_pixel_values', 'input_ids'])
     Shapes:(1, 3, 256, 256), (1, 3, 256, 256), (1, 77)
-    '''
+    """
 
     # test dataloader by loading a batch and displaying the input_image, edit_prompt and edited_image
     # batch = next(iter(data_loader))
@@ -344,13 +389,15 @@ def plot_batch(sample, tokenizer):
     original_images = sample["original_pixel_values"]
     edited_images = sample["edited_pixel_values"]
     captions = tokenizer.batch_decode(sample["input_ids"], skip_special_tokens=True)
-    for original_image, edited_image, caption in zip(original_images, edited_images, captions):
+    for original_image, edited_image, caption in zip(
+        original_images, edited_images, captions
+    ):
         # is original_image object a PIL image?
         if isinstance(original_image, PIL.Image.Image):
             original_image = (original_image.permute(1, 2, 0) + 1) / 2
         else:
             original_image = (original_image.transpose(1, 2, 0) + 1) / 2
-            
+
         if isinstance(edited_image, PIL.Image.Image):
             edited_image = (edited_image.permute(1, 2, 0) + 1) / 2
         else:
@@ -366,18 +413,21 @@ def plot_batch(sample, tokenizer):
         plt.title(f'Prompt:"{caption}"')
         plt.show()
 
+
 def batch_to_pil_plus_text(batch, tokenizer):
     original_images = batch["original_pixel_values"]
     edited_images = batch["edited_pixel_values"]
     captions = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
-    org_numpy_images, ed_numpy_images, texts = [], [], [] 
-    for original_image, edited_image, caption in zip(original_images, edited_images, captions):
+    org_numpy_images, ed_numpy_images, texts = [], [], []
+    for original_image, edited_image, caption in zip(
+        original_images, edited_images, captions
+    ):
         # is original_image object a PIL image?
         if isinstance(original_image, PIL.Image.Image):
             original_image = (original_image.permute(1, 2, 0) + 1) / 2
         else:
             original_image = (original_image.transpose(1, 2, 0) + 1) / 2
-            
+
         if isinstance(edited_image, PIL.Image.Image):
             edited_image = (edited_image.permute(1, 2, 0) + 1) / 2
         else:
@@ -385,7 +435,7 @@ def batch_to_pil_plus_text(batch, tokenizer):
         org_numpy_images.append(original_image)
         ed_numpy_images.append(edited_image)
         texts.append(caption)
-    
+
     op_images = numpy_to_pil(np.array(org_numpy_images))
     ed_images = numpy_to_pil(np.array(ed_numpy_images))
     return op_images, ed_images, texts

@@ -51,8 +51,8 @@ EOF
 FILE="requirements.txt"
 
 /usr/bin/cat <<EOM >$FILE
-jax>=0.4.23
-jaxlib>=0.4.23
+# jax>=0.4.23
+# jaxlib>=0.4.23
 orbax-checkpoint>=0.5.2
 absl-py
 array-record
@@ -92,6 +92,8 @@ EOM
 python -m venv venv
 source venv/bin/activate
 
+pip install -U pip
+
 # Save current directory
 run_name_folder_path=$(pwd)
 
@@ -111,7 +113,6 @@ echo "Installing nightly tensorboard plugin profile"
 pip3 install tbp-nightly --upgrade
 
 # Install dependencies from requirements.txt
-cd "$run_name_folder_path" && pip install --upgrade pip
 pip3 install -U -r requirements.txt
 
 # Install pre-commit hooks if available
