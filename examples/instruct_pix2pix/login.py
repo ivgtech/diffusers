@@ -27,7 +27,7 @@ def main():
     secrets = load_secrets("secrets.yaml")
 
     login_to_wandb(secrets["wandb"]["token"])
-    login(add_to_git_credential=True, token=secrets["huggingface"]["token"])
+    login(token=secrets["huggingface"]["token"])
 
     print("Logged into both wandb and Hugging Face successfully.")
 

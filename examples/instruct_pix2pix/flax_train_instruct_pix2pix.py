@@ -63,7 +63,21 @@ DATASET_NAME_MAPPING = {
 }
 WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
 
-# convert the namespace to a dictionary
+
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+    level=logging.INFO,
+)
+# Setup logging, we only want one process per machine to log things on the screen.
+logger.setLevel(logging.INFO if jax.process_index() == 0 else logging.ERROR)
+if jax.process_index() == 0:
+    transformers.utils.logging.set_verbosity_info()
+else:
+    transformers.utils.logging.set_verbosity_error()
+
+
+# Convert the namespace to a dictionary
 args = {
     "pretrained_model_name_or_path": "runwayml/stable-diffusion-v1-5",
     "revision": "bf16",
@@ -85,9 +99,9 @@ args = {
     "resolution": 4,
     "center_crop": False,
     "random_flip": True,
-    "train_batch_size": 64,
+    "train_batch_size": 16,
     "num_train_epochs": 100,
-    "max_train_steps": 40000,
+    "max_train_steps": 400,
     "gradient_accumulation_steps": 4,
     "gradient_checkpointing": True,
     "learning_rate": 5e-05,
@@ -109,12 +123,14 @@ args = {
     "hub_token": None,
     "hub_model_id": None,
     "wandb_entity": None,
+    "logging_steps": 10,
+    "streaming": False,
     "tracker_project_name": "flax-instruct-pix2pix",
     "logging_dir": "logs",
     "mixed_precision": "bf16",
     "report_to": "wandb",  # "tensorboard",
     "local_rank": -1,
-    "checkpointing_steps": 20000,
+    "checkpointing_steps": 1000,
     "checkpoints_total_limit": 1,
     "resume_from_checkpoint": None,
     "enable_xformers_memory_efficient_attention": True,
@@ -134,19 +150,6 @@ class Args:
 
 
 args = Args(**args)
-
-
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-    datefmt="%m/%d/%Y %H:%M:%S",
-    level=logging.INFO,
-)
-# Setup logging, we only want one process per machine to log things on the screen.
-logger.setLevel(logging.INFO if jax.process_index() == 0 else logging.ERROR)
-if jax.process_index() == 0:
-    transformers.utils.logging.set_verbosity_info()
-else:
-    transformers.utils.logging.set_verbosity_error()
 
 # wandb init
 if jax.process_index() == 0 and args.report_to == "wandb":
@@ -191,7 +194,6 @@ def get_nparams(params: FrozenDict) -> int:
 
 # (2) Data loader: Creates a JAX generator from a standard PyTorch dataloader
 
-
 num_devices = jax.local_device_count()  # Number of JAX devices
 batch_size = (
     args.train_batch_size
@@ -208,12 +210,7 @@ train_dataloader = DataLoader(
 
 # (3) Models and state
 
-weight_dtype = jnp.float32
-if args.mixed_precision == "fp16":
-    weight_dtype = jnp.float16
-elif args.mixed_precision == "bf16":
-    weight_dtype = jnp.bfloat16
-
+weight_dtype = jnp.bfloat16
 
 # NOTE: Hugging Face uses variants (`bfloat16` or `flax`) to refer to different repository branches and hence different checkpoints.
 # The `bfloat16` branch/variant refers to `EMA only weights` (parameters where smoothed out during training) and `flax` refers to the `raw weights` (no EMA smoothing used during training).
@@ -328,14 +325,18 @@ def tokenize_captions(captions):
 
 
 def apply_conditioning_dropout(
-    encoder_hidden_states, original_image_embeds, dropout_rng, bsz, args
+    encoder_hidden_states,
+    original_image_embeds,
+    dropout_rng,
+    bsz,
+    conditioning_dropout_prob,
 ):
     # Ensure bsz is a static value
     # Generating a random tensor `random_p` with shape (bsz,)
     random_p = jax.random.uniform(dropout_rng, (bsz,))
 
     # Generating the prompt mask
-    prompt_mask = random_p < 2 * args.conditioning_dropout_prob
+    prompt_mask = random_p < 2 * conditioning_dropout_prob
     prompt_mask = prompt_mask.reshape(
         bsz, 1, 1
     )  # Reshape to match dimensions for broadcasting
@@ -351,8 +352,8 @@ def apply_conditioning_dropout(
     # Generating the image mask
     image_mask_dtype = original_image_embeds.dtype
     image_mask = 1 - (
-        (random_p >= args.conditioning_dropout_prob).astype(image_mask_dtype)
-        * (random_p < 3 * args.conditioning_dropout_prob).astype(image_mask_dtype)
+        (random_p >= conditioning_dropout_prob).astype(image_mask_dtype)
+        * (random_p < 3 * conditioning_dropout_prob).astype(image_mask_dtype)
     )
     image_mask = image_mask.reshape(bsz, 1, 1, 1)
 
@@ -465,7 +466,11 @@ def train_step(state, text_encoder_params, vae_params, batch, train_rng):
 
         # (7) Classifier-Free Guidance (conditioning dropout)
         encoder_hidden_states, original_image_embeds = apply_conditioning_dropout(
-            encoder_hidden_states, original_image_embeds, dropout_rng, bsz, args
+            encoder_hidden_states,
+            original_image_embeds,
+            dropout_rng,
+            bsz,
+            args.conditioning_dropout_prob,
         )
 
         # Concatenate the noisy latents with the original image embeddings
@@ -576,21 +581,35 @@ if jax.process_index() == 0 and args.report_to == "wandb":
     )
 
 
-global_step = 0
+global_step = step0 = 0
+epochs = tqdm(
+    range(args.num_train_epochs),
+    desc="Epoch ... ",
+    position=0,
+    disable=jax.process_index() > 0,
+)
 
 # Monotonic clock to measure time
-# t0, step0 = time.monotonic(), 0
 t00 = t0 = time.monotonic()
 
-epochs = tqdm(range(args.num_train_epochs), desc="Epoch ... ", position=0)
 for epoch in epochs:
     # ======================== Training ================================
     train_metrics = []
+    train_metric = None
 
-    steps_per_epoch = len_train_dataset // total_train_batch_size
-    train_step_progress_bar = tqdm(
-        total=steps_per_epoch, desc="Training...", position=1, leave=False
+    steps_per_epoch = (
+        args.max_train_samples // total_train_batch_size
+        if args.streaming or args.max_train_samples
+        else len(train_dataset) // total_train_batch_size
     )
+    train_step_progress_bar = tqdm(
+        total=steps_per_epoch,
+        desc="Training...",
+        position=1,
+        leave=False,
+        disable=jax.process_index() > 0,
+    )
+
     # train
     for batch in train_dataloader:
         batch = shard(batch)
@@ -721,3 +740,8 @@ if jax.process_index() == 0:
             )
         except Exception as e:
             logger.error(f"Error uploading model to the hub: {e}")
+
+# %%
+
+# if __name__ == "__main__":
+#     main()
