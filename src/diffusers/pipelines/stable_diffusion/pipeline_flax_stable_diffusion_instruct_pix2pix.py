@@ -25,18 +25,17 @@ from flax.training.common_utils import shard
 from PIL import Image
 from transformers import CLIPImageProcessor, CLIPTokenizer, FlaxCLIPTextModel
 
-from ...models import FlaxAutoencoderKL, FlaxUNet2DConditionModel
-from ...schedulers import (
+from diffusers.models import FlaxAutoencoderKL, FlaxUNet2DConditionModel
+from diffusers.schedulers import (
     FlaxDDIMScheduler,
     FlaxDPMSolverMultistepScheduler,
     FlaxLMSDiscreteScheduler,
     FlaxPNDMScheduler,
 )
-from ...utils import PIL_INTERPOLATION, logging, replace_example_docstring
-from ..pipeline_flax_utils import FlaxDiffusionPipeline
-from .pipeline_output import FlaxStableDiffusionPipelineOutput
-from .safety_checker_flax import FlaxStableDiffusionSafetyChecker
-
+from diffusers.utils import PIL_INTERPOLATION, logging, replace_example_docstring
+from diffusers.pipelines.pipeline_flax_utils import FlaxDiffusionPipeline
+from diffusers.pipelines.stable_diffusion.pipeline_output import FlaxStableDiffusionPipelineOutput
+from diffusers.pipelines.stable_diffusion.safety_checker_flax import FlaxStableDiffusionSafetyChecker
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 

@@ -1,5 +1,3 @@
-# %% 
-
 import io
 import os
 
@@ -8,34 +6,41 @@ import numpy as np
 import pyarrow.parquet as pq
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 from torchvision import transforms
 from transformers import CLIPTokenizer
 
 # Assume the tokenizer is initialized here
 tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
 
+
 class ParquetDataset(Dataset):
-    def __init__(self, directory, transform=None, tokenizer=None, resolution=256, ALL_FILES=False):
+    def __init__(
+        self, directory, transform=None, tokenizer=None, resolution=256, ALL_FILES=True
+    ):
         self.directory = directory
         self.transform = transform
         self.tokenizer = tokenizer
         self.resolution = resolution
-        self.file_paths = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.parquet')]
+        self.file_paths = [
+            os.path.join(directory, f)
+            for f in os.listdir(directory)
+            if f.endswith(".parquet")
+        ]
         self.file_paths = self.file_paths if ALL_FILES else self.file_paths[:1]
         self.dataframes = [pq.read_table(fp).to_pandas() for fp in self.file_paths]
         self.original = []
-        self.edited   = []
-        self.prompts  = []
+        self.edited = []
+        self.prompts = []
         self.prepare_data()
 
     def get_from_parquet(self, image_bytes):
-        image = Image.open(io.BytesIO(image_bytes['bytes']))
+        image = Image.open(io.BytesIO(image_bytes["bytes"]))
         return image
         # image = image.convert("RGB").resize((self.resolution, self.resolution))
         # if self.transform:
         #     image = self.transform(image)
-        
+
         # H,W,C = image.shape[-3:] # Get image dimensions as we're uncertain about the input shape (how many batch dimensions are present?)
         # return np.asarray(image.reshape(-1, H, W, C)) # Transpose dimensions to CHW format
 
@@ -44,13 +49,13 @@ class ParquetDataset(Dataset):
 
         for df in self.dataframes:
             # Assuming 'original_image' and 'edited_image' are columns with image bytes
-            self.original += [self.get_from_parquet(img) for img in df['original_image']]
-            self.edited   += [self.get_from_parquet(img) for img in df['edited_image']]
-            self.prompts  += list(df['edit_prompt'])
+            self.original += [
+                self.get_from_parquet(img) for img in df["original_image"]
+            ]
+            self.edited += [self.get_from_parquet(img) for img in df["edited_image"]]
+            self.prompts += list(df["edit_prompt"])
 
         # self.original, self.edited, self.input_ids = self.preprocess_train(original, edited, prompts)
-
-
 
     def convert_to_np(self, image, resolution):
         image = image.convert("RGB").resize((resolution, resolution))
@@ -67,7 +72,9 @@ class ParquetDataset(Dataset):
         images = np.concatenate([original_image, edited_image])
         images = torch.tensor(images)
         images = 2 * (images / 255) - 1
-        return self.transform(images) # NOTE: `transform` is a torchvision `Compose` object and so this method will return a torch tensor
+        return self.transform(
+            images
+        )  # NOTE: `transform` is a torchvision `Compose` object and so this method will return a torch tensor
 
     def preprocess_train(self, original, edited, prompt):
 
@@ -86,23 +93,23 @@ class ParquetDataset(Dataset):
 
     def tokenize_prompt(self, prompt):
         inputs = self.tokenizer(
-            prompt, max_length=self.tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
+            prompt,
+            max_length=self.tokenizer.model_max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
         )
         return inputs.input_ids.squeeze()
 
     def __getitem__(self, idx):
-        # np_original_pixel_values = np.stack([image for image in self.original]).astype(np.float32)
-        # np_edited_pixel_values = np.stack([image for image in self.edited]).astype(np.float32)
-        # np_input_ids = np.stack([prompt for prompt in self.input_ids])
-
-        original_tensor, edited_tensor, prompts_tensor = self.preprocess_train(self.original[idx], self.edited[idx], self.prompts[idx])
-
+        original_tensor, edited_tensor, prompts_tensor = self.preprocess_train(
+            self.original[idx], self.edited[idx], self.prompts[idx]
+        )
         return {
             "original_pixel_values": original_tensor,
             "edited_pixel_values": edited_tensor,
             "input_ids": prompts_tensor,
         }
-
 
     def __len__(self):
         return len(self.prompts)
@@ -114,23 +121,39 @@ RANDOM_FLIP = True
 
 train_transforms = transforms.Compose(
     [
-        transforms.CenterCrop(RESOLUTION) if CENTER_CROP else transforms.RandomCrop(RESOLUTION),
-        transforms.RandomHorizontalFlip() if RANDOM_FLIP else transforms.Lambda(lambda x: x),
+        (
+            transforms.CenterCrop(RESOLUTION)
+            if CENTER_CROP
+            else transforms.RandomCrop(RESOLUTION)
+        ),
+        (
+            transforms.RandomHorizontalFlip()
+            if RANDOM_FLIP
+            else transforms.Lambda(lambda x: x)
+        ),
     ]
 )
+
 
 def collate_fn_jax(examples):
     # Convert to numpy arrays and remove the singleton dimension (N,1,77 etc.)
     # np.stack applied to (M,1) or (1,M) -> (N,1,M)
     # np.stack applied to (M,) -> (N,M)
     # np.stack applied to (M,P) -> (N,M,P)
-    np_original_pixel_values = np.stack([example["original_pixel_values"] for example in examples]).astype(np.float32).squeeze(1)
-    np_edited_pixel_values = np.stack([example["edited_pixel_values"] for example in examples]).astype(np.float32).squeeze(1)
+    np_original_pixel_values = (
+        np.stack([example["original_pixel_values"] for example in examples])
+        .astype(np.float32)
+        .squeeze(1)
+    )
+    np_edited_pixel_values = (
+        np.stack([example["edited_pixel_values"] for example in examples])
+        .astype(np.float32)
+        .squeeze(1)
+    )
     np_input_ids = np.stack([example["input_ids"] for example in examples])
 
-
     # Move data to accelerator
-    original_pixel_values  = jax.device_put(np_original_pixel_values)
+    original_pixel_values = jax.device_put(np_original_pixel_values)
     edited_pixel_values = jax.device_put(np_edited_pixel_values)
     input_ids = jax.device_put(np_input_ids)
 
@@ -141,24 +164,10 @@ def collate_fn_jax(examples):
     }
 
 
+# download_path = '/home/v/diffusers/examples/instruct_pix2pix/data'
+# download_path = '/home/v/data'
 
 # Initialize dataset and DataLoader
-download_path = '/home/v/data'
-download_path = '/home/v/diffusers/examples/instruct_pix2pix/data'
-dataset = ParquetDataset(download_path, transform=train_transforms, tokenizer=tokenizer)
 
-# dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=collate_fn_jax, drop_last=True)
-
-# # %% 
-# # Example usage in a training loop
-# for batch in dataloader:
-#     images = batch['original_pixel_values']  # Images in CHW format ready for the model
-#     input_ids = batch['input_ids']  # Tokenized captions
-#     print(images.shape, images.dtype, images.max(), images.min())  
-#     print(input_ids.shape)
-#     break
-#     # Further processing such as training goes here
-
-# # # %%
-
-# # %%
+DOWNLOAD_DIR = "data/"
+dataset = ParquetDataset(DOWNLOAD_DIR, transform=train_transforms, tokenizer=tokenizer)

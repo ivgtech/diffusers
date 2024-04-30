@@ -125,3 +125,5 @@ for i in range(len(text_prompts)):
 for i in range(len(images)):
     images[i].show()
     
+
+# %%

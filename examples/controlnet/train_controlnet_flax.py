@@ -16,8 +16,10 @@
 import argparse
 import logging
 import math
+
 import os
 import random
+
 import time
 from pathlib import Path
 
@@ -26,7 +28,9 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import torch
+
 import torch.utils.checkpoint
+
 import transformers
 from datasets import load_dataset, load_from_disk
 from flax import jax_utils
@@ -65,7 +69,9 @@ check_min_version("0.28.0.dev0")
 logger = logging.getLogger(__name__)
 
 
-def log_validation(pipeline, pipeline_params, controlnet_params, tokenizer, args, rng, weight_dtype):
+def log_validation(
+    pipeline, pipeline_params, controlnet_params, tokenizer, args, rng, weight_dtype
+):
     logger.info("Running validation...")
 
     pipeline_params = pipeline_params.copy()
@@ -90,13 +96,17 @@ def log_validation(pipeline, pipeline_params, controlnet_params, tokenizer, args
 
     image_logs = []
 
-    for validation_prompt, validation_image in zip(validation_prompts, validation_images):
+    for validation_prompt, validation_image in zip(
+        validation_prompts, validation_images
+    ):
         prompts = num_samples * [validation_prompt]
         prompt_ids = pipeline.prepare_text_inputs(prompts)
         prompt_ids = shard(prompt_ids)
 
         validation_image = Image.open(validation_image).convert("RGB")
-        processed_image = pipeline.prepare_image_inputs(num_samples * [validation_image])
+        processed_image = pipeline.prepare_image_inputs(
+            num_samples * [validation_image]
+        )
         processed_image = shard(processed_image)
         images = pipeline(
             prompt_ids=prompt_ids,
@@ -107,11 +117,17 @@ def log_validation(pipeline, pipeline_params, controlnet_params, tokenizer, args
             jit=True,
         ).images
 
-        images = images.reshape((images.shape[0] * images.shape[1],) + images.shape[-3:])
+        images = images.reshape(
+            (images.shape[0] * images.shape[1],) + images.shape[-3:]
+        )
         images = pipeline.numpy_to_pil(images)
 
         image_logs.append(
-            {"validation_image": validation_image, "images": images, "validation_prompt": validation_prompt}
+            {
+                "validation_image": validation_image,
+                "images": images,
+                "validation_prompt": validation_prompt,
+            }
         )
 
     if args.report_to == "wandb":
@@ -121,7 +137,9 @@ def log_validation(pipeline, pipeline_params, controlnet_params, tokenizer, args
             validation_prompt = log["validation_prompt"]
             validation_image = log["validation_image"]
 
-            formatted_images.append(wandb.Image(validation_image, caption="Controlnet conditioning"))
+            formatted_images.append(
+                wandb.Image(validation_image, caption="Controlnet conditioning")
+            )
             for image in images:
                 image = wandb.Image(image, caption=validation_prompt)
                 formatted_images.append(image)
@@ -143,7 +161,9 @@ def save_model_card(repo_id: str, image_logs=None, base_model=str, repo_folder=N
             validation_image.save(os.path.join(repo_folder, "image_control.png"))
             img_str += f"prompt: {validation_prompt}\n"
             images = [validation_image] + images
-            make_image_grid(images, 1, len(images)).save(os.path.join(repo_folder, f"images_{i}.png"))
+            make_image_grid(images, 1, len(images)).save(
+                os.path.join(repo_folder, f"images_{i}.png")
+            )
             img_str += f"![images_{i})](./images_{i}.png)\n"
 
     model_description = f"""
@@ -254,7 +274,9 @@ def parse_args():
         default=None,
         help="The directory where the downloaded models and datasets will be stored.",
     )
-    parser.add_argument("--seed", type=int, default=0, help="A seed for reproducible training.")
+    parser.add_argument(
+        "--seed", type=int, default=0, help="A seed for reproducible training."
+    )
     parser.add_argument(
         "--resolution",
         type=int,
@@ -265,7 +287,10 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size",
+        type=int,
+        default=1,
+        help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
@@ -315,13 +340,41 @@ def parse_args():
             "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
         ),
     )
-    parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
-    parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
-    parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
-    parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
-    parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
-    parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
+    parser.add_argument(
+        "--adam_beta1",
+        type=float,
+        default=0.9,
+        help="The beta1 parameter for the Adam optimizer.",
+    )
+    parser.add_argument(
+        "--adam_beta2",
+        type=float,
+        default=0.999,
+        help="The beta2 parameter for the Adam optimizer.",
+    )
+    parser.add_argument(
+        "--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use."
+    )
+    parser.add_argument(
+        "--adam_epsilon",
+        type=float,
+        default=1e-08,
+        help="Epsilon value for the Adam optimizer",
+    )
+    parser.add_argument(
+        "--max_grad_norm", default=1.0, type=float, help="Max gradient norm."
+    )
+    parser.add_argument(
+        "--push_to_hub",
+        action="store_true",
+        help="Whether or not to push the model to the Hub.",
+    )
+    parser.add_argument(
+        "--hub_token",
+        type=str,
+        default=None,
+        help="The token to use to push to the Model Hub.",
+    )
     parser.add_argument(
         "--hub_model_id",
         type=str,
@@ -338,7 +391,9 @@ def parse_args():
         "--report_to",
         type=str,
         default="wandb",
-        help=('The integration to report the results and logs to. Currently only supported platforms are `"wandb"`'),
+        help=(
+            'The integration to report the results and logs to. Currently only supported platforms are `"wandb"`'
+        ),
     )
     parser.add_argument(
         "--mixed_precision",
@@ -361,7 +416,9 @@ def parse_args():
             " or to a folder containing files that 🤗 Datasets can understand."
         ),
     )
-    parser.add_argument("--streaming", action="store_true", help="To stream a large dataset from Hub.")
+    parser.add_argument(
+        "--streaming", action="store_true", help="To stream a large dataset from Hub."
+    )
     parser.add_argument(
         "--dataset_config_name",
         type=str,
@@ -387,7 +444,10 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--image_column", type=str, default="image", help="The column of the dataset containing the target image."
+        "--image_column",
+        type=str,
+        default="image",
+        help="The column of the dataset containing the target image.",
     )
     parser.add_argument(
         "--conditioning_image_column",
@@ -448,7 +508,12 @@ def parse_args():
             " `args.validation_prompt` and logging the images."
         ),
     )
-    parser.add_argument("--wandb_entity", type=str, default=None, help=("The wandb entity to use (for teams)."))
+    parser.add_argument(
+        "--wandb_entity",
+        type=str,
+        default=None,
+        help=("The wandb entity to use (for teams)."),
+    )
     parser.add_argument(
         "--tracker_project_name",
         type=str,
@@ -456,12 +521,22 @@ def parse_args():
         help=("The `project` argument passed to wandb"),
     )
     parser.add_argument(
-        "--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients over"
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of steps to accumulate gradients over",
     )
-    parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
+    parser.add_argument(
+        "--local_rank",
+        type=int,
+        default=-1,
+        help="For distributed training: local_rank",
+    )
 
     args = parser.parse_args()
-    args.output_dir = args.output_dir.replace("{timestamp}", time.strftime("%Y%m%d_%H%M%S"))
+    args.output_dir = args.output_dir.replace(
+        "{timestamp}", time.strftime("%Y%m%d_%H%M%S")
+    )
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
@@ -477,10 +552,14 @@ def parse_args():
         raise ValueError("`--proportion_empty_prompts` must be in the range [0, 1].")
 
     if args.validation_prompt is not None and args.validation_image is None:
-        raise ValueError("`--validation_image` must be set if `--validation_prompt` is set")
+        raise ValueError(
+            "`--validation_image` must be set if `--validation_prompt` is set"
+        )
 
     if args.validation_prompt is None and args.validation_image is not None:
-        raise ValueError("`--validation_prompt` must be set if `--validation_image` is set")
+        raise ValueError(
+            "`--validation_prompt` must be set if `--validation_image` is set"
+        )
 
     if (
         args.validation_image is not None
@@ -497,7 +576,9 @@ def parse_args():
     # This idea comes from
     # https://github.com/borisdayma/dalle-mini/blob/d2be512d4a6a9cda2d63ba04afc33038f98f705f/src/dalle_mini/data.py#L370
     if args.streaming and args.max_train_samples is None:
-        raise ValueError("You must specify `max_train_samples` when using dataset streaming.")
+        raise ValueError(
+            "You must specify `max_train_samples` when using dataset streaming."
+        )
 
     return args
 
@@ -583,13 +664,19 @@ def make_train_dataset(args, tokenizer, batch_size=None):
                     f"Caption column `{caption_column}` should contain either strings or lists of strings."
                 )
         inputs = tokenizer(
-            captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
+            captions,
+            max_length=tokenizer.model_max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
         )
         return inputs.input_ids
 
     image_transforms = transforms.Compose(
         [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.Resize(
+                args.resolution, interpolation=transforms.InterpolationMode.BILINEAR
+            ),
             transforms.CenterCrop(args.resolution),
             transforms.ToTensor(),
             transforms.Normalize([0.5], [0.5]),
@@ -598,7 +685,9 @@ def make_train_dataset(args, tokenizer, batch_size=None):
 
     conditioning_image_transforms = transforms.Compose(
         [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.Resize(
+                args.resolution, interpolation=transforms.InterpolationMode.BILINEAR
+            ),
             transforms.CenterCrop(args.resolution),
             transforms.ToTensor(),
         ]
@@ -608,8 +697,12 @@ def make_train_dataset(args, tokenizer, batch_size=None):
         images = [image.convert("RGB") for image in examples[image_column]]
         images = [image_transforms(image) for image in images]
 
-        conditioning_images = [image.convert("RGB") for image in examples[conditioning_image_column]]
-        conditioning_images = [conditioning_image_transforms(image) for image in conditioning_images]
+        conditioning_images = [
+            image.convert("RGB") for image in examples[conditioning_image_column]
+        ]
+        conditioning_images = [
+            conditioning_image_transforms(image) for image in conditioning_images
+        ]
 
         examples["pixel_values"] = images
         examples["conditioning_pixel_values"] = conditioning_images
@@ -620,9 +713,17 @@ def make_train_dataset(args, tokenizer, batch_size=None):
     if jax.process_index() == 0:
         if args.max_train_samples is not None:
             if args.streaming:
-                dataset["train"] = dataset["train"].shuffle(seed=args.seed).take(args.max_train_samples)
+                dataset["train"] = (
+                    dataset["train"]
+                    .shuffle(seed=args.seed)
+                    .take(args.max_train_samples)
+                )
             else:
-                dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
+                dataset["train"] = (
+                    dataset["train"]
+                    .shuffle(seed=args.seed)
+                    .select(range(args.max_train_samples))
+                )
         # Set the training transforms
         if args.streaming:
             train_dataset = dataset["train"].map(
@@ -641,8 +742,12 @@ def collate_fn(examples):
     pixel_values = torch.stack([example["pixel_values"] for example in examples])
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    conditioning_pixel_values = torch.stack([example["conditioning_pixel_values"] for example in examples])
-    conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
+    conditioning_pixel_values = torch.stack(
+        [example["conditioning_pixel_values"] for example in examples]
+    )
+    conditioning_pixel_values = conditioning_pixel_values.to(
+        memory_format=torch.contiguous_format
+    ).float()
 
     input_ids = torch.stack([example["input_ids"] for example in examples])
 
@@ -701,7 +806,9 @@ def main():
 
         if args.push_to_hub:
             repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
+                repo_id=args.hub_model_id or Path(args.output_dir).name,
+                exist_ok=True,
+                token=args.hub_token,
             ).repo_id
 
     # Load the tokenizer and add the placeholder token as a additional special token
@@ -709,14 +816,22 @@ def main():
         tokenizer = CLIPTokenizer.from_pretrained(args.tokenizer_name)
     elif args.pretrained_model_name_or_path:
         tokenizer = CLIPTokenizer.from_pretrained(
-            args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer",
+            revision=args.revision,
         )
     else:
         raise NotImplementedError("No tokenizer specified!")
 
     # Get the datasets: you can either provide your own training and evaluation files (see below)
-    total_train_batch_size = args.train_batch_size * jax.local_device_count() * args.gradient_accumulation_steps
-    train_dataset = make_train_dataset(args, tokenizer, batch_size=total_train_batch_size)
+    total_train_batch_size = (
+        args.train_batch_size
+        * jax.local_device_count()
+        * args.gradient_accumulation_steps
+    )
+    train_dataset = make_train_dataset(
+        args, tokenizer, batch_size=total_train_batch_size
+    )
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -823,7 +938,9 @@ def main():
         adamw,
     )
 
-    state = train_state.TrainState.create(apply_fn=controlnet.__call__, params=controlnet_params, tx=optimizer)
+    state = train_state.TrainState.create(
+        apply_fn=controlnet.__call__, params=controlnet_params, tx=optimizer
+    )
 
     noise_scheduler, noise_scheduler_state = FlaxDDPMScheduler.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="scheduler"
@@ -847,16 +964,26 @@ def main():
         snr = (alpha / sigma) ** 2
         return snr
 
-    def train_step(state, unet_params, text_encoder_params, vae_params, batch, train_rng):
+    def train_step(
+        state, unet_params, text_encoder_params, vae_params, batch, train_rng
+    ):
         # reshape batch, add grad_step_dim if gradient_accumulation_steps > 1
         if args.gradient_accumulation_steps > 1:
             grad_steps = args.gradient_accumulation_steps
-            batch = jax.tree_map(lambda x: x.reshape((grad_steps, x.shape[0] // grad_steps) + x.shape[1:]), batch)
+            batch = jax.tree_map(
+                lambda x: x.reshape(
+                    (grad_steps, x.shape[0] // grad_steps) + x.shape[1:]
+                ),
+                batch,
+            )
 
         def compute_loss(params, minibatch, sample_rng):
             # Convert images to latent space
             vae_outputs = vae.apply(
-                {"params": vae_params}, minibatch["pixel_values"], deterministic=True, method=vae.encode
+                {"params": vae_params},
+                minibatch["pixel_values"],
+                deterministic=True,
+                method=vae.encode,
             )
             latents = vae_outputs.latent_dist.sample(sample_rng)
             # (NHWC) -> (NCHW)
@@ -877,7 +1004,9 @@ def main():
 
             # Add noise to the latents according to the noise magnitude at each timestep
             # (this is the forward diffusion process)
-            noisy_latents = noise_scheduler.add_noise(noise_scheduler_state, latents, noise, timesteps)
+            noisy_latents = noise_scheduler.add_noise(
+                noise_scheduler_state, latents, noise, timesteps
+            )
 
             # Get the text embedding for conditioning
             encoder_hidden_states = text_encoder(
@@ -912,15 +1041,21 @@ def main():
             if noise_scheduler.config.prediction_type == "epsilon":
                 target = noise
             elif noise_scheduler.config.prediction_type == "v_prediction":
-                target = noise_scheduler.get_velocity(noise_scheduler_state, latents, noise, timesteps)
+                target = noise_scheduler.get_velocity(
+                    noise_scheduler_state, latents, noise, timesteps
+                )
             else:
-                raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                raise ValueError(
+                    f"Unknown prediction type {noise_scheduler.config.prediction_type}"
+                )
 
             loss = (target - model_pred) ** 2
 
             if args.snr_gamma is not None:
                 snr = jnp.array(compute_snr(timesteps))
-                snr_loss_weights = jnp.where(snr < args.snr_gamma, snr, jnp.ones_like(snr) * args.snr_gamma)
+                snr_loss_weights = jnp.where(
+                    snr < args.snr_gamma, snr, jnp.ones_like(snr) * args.snr_gamma
+                )
                 if noise_scheduler.config.prediction_type == "epsilon":
                     snr_loss_weights = snr_loss_weights / snr
                 elif noise_scheduler.config.prediction_type == "v_prediction":
@@ -943,7 +1078,9 @@ def main():
 
         def loss_and_grad(grad_idx, train_rng):
             # create minibatch for the grad step
-            minibatch = get_minibatch(batch, grad_idx) if grad_idx is not None else batch
+            minibatch = (
+                get_minibatch(batch, grad_idx) if grad_idx is not None else batch
+            )
             sample_rng, train_rng = jax.random.split(train_rng, 2)
             loss, grad = grad_fn(state.params, minibatch, sample_rng)
             return loss, grad, train_rng
@@ -953,14 +1090,18 @@ def main():
         else:
             init_loss_grad_rng = (
                 0.0,  # initial value for cumul_loss
-                jax.tree_map(jnp.zeros_like, state.params),  # initial value for cumul_grad
+                jax.tree_map(
+                    jnp.zeros_like, state.params
+                ),  # initial value for cumul_grad
                 train_rng,  # initial value for train_rng
             )
 
             def cumul_grad_step(grad_idx, loss_grad_rng):
                 cumul_loss, cumul_grad, train_rng = loss_grad_rng
                 loss, grad, new_train_rng = loss_and_grad(grad_idx, train_rng)
-                cumul_loss, cumul_grad = jax.tree_map(jnp.add, (cumul_loss, cumul_grad), (loss, grad))
+                cumul_loss, cumul_grad = jax.tree_map(
+                    jnp.add, (cumul_loss, cumul_grad), (loss, grad)
+                )
                 return cumul_loss, cumul_grad, new_train_rng
 
             loss, grad, new_train_rng = jax.lax.fori_loop(
@@ -969,7 +1110,9 @@ def main():
                 cumul_grad_step,
                 init_loss_grad_rng,
             )
-            loss, grad = jax.tree_map(lambda x: x / args.gradient_accumulation_steps, (loss, grad))
+            loss, grad = jax.tree_map(
+                lambda x: x / args.gradient_accumulation_steps, (loss, grad)
+            )
 
         grad = jax.lax.pmean(grad, "batch")
 
@@ -979,7 +1122,9 @@ def main():
         metrics = jax.lax.pmean(metrics, axis_name="batch")
 
         def l2(xs):
-            return jnp.sqrt(sum([jnp.vdot(x, x) for x in jax.tree_util.tree_leaves(xs)]))
+            return jnp.sqrt(
+                sum([jnp.vdot(x, x) for x in jax.tree_util.tree_leaves(xs)])
+            )
 
         metrics["l2_grads"] = l2(jax.tree_util.tree_leaves(grad))
 
@@ -999,7 +1144,9 @@ def main():
         dataset_length = args.max_train_samples
     else:
         dataset_length = len(train_dataloader)
-    num_update_steps_per_epoch = math.ceil(dataset_length / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(
+        dataset_length / args.gradient_accumulation_steps
+    )
 
     # Scheduler and math around the number of training steps.
     if args.max_train_steps is None:
@@ -1008,22 +1155,33 @@ def main():
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {args.max_train_samples if args.streaming else len(train_dataset)}")
+    logger.info(
+        f"  Num examples = {args.max_train_samples if args.streaming else len(train_dataset)}"
+    )
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel & distributed) = {total_train_batch_size}")
-    logger.info(f"  Total optimization steps = {args.num_train_epochs * num_update_steps_per_epoch}")
+    logger.info(
+        f"  Total train batch size (w. parallel & distributed) = {total_train_batch_size}"
+    )
+    logger.info(
+        f"  Total optimization steps = {args.num_train_epochs * num_update_steps_per_epoch}"
+    )
 
     if jax.process_index() == 0 and args.report_to == "wandb":
         wandb.define_metric("*", step_metric="train/step")
         wandb.define_metric("train/step", step_metric="walltime")
         wandb.config.update(
             {
-                "num_train_examples": args.max_train_samples if args.streaming else len(train_dataset),
+                "num_train_examples": (
+                    args.max_train_samples if args.streaming else len(train_dataset)
+                ),
                 "total_train_batch_size": total_train_batch_size,
-                "total_optimization_step": args.num_train_epochs * num_update_steps_per_epoch,
+                "total_optimization_step": args.num_train_epochs
+                * num_update_steps_per_epoch,
                 "num_devices": jax.device_count(),
-                "controlnet_params": sum(np.prod(x.shape) for x in jax.tree_util.tree_leaves(state.params)),
+                "controlnet_params": sum(
+                    np.prod(x.shape) for x in jax.tree_util.tree_leaves(state.params)
+                ),
             }
         )
 
@@ -1035,7 +1193,9 @@ def main():
         disable=jax.process_index() > 0,
     )
     if args.profile_memory:
-        jax.profiler.save_device_memory_profile(os.path.join(args.output_dir, "memory_initial.prof"))
+        jax.profiler.save_device_memory_profile(
+            os.path.join(args.output_dir, "memory_initial.prof")
+        )
     t00 = t0 = time.monotonic()
     for epoch in epochs:
         # ======================== Training ================================
@@ -1067,7 +1227,12 @@ def main():
             batch = shard(batch)
             with jax.profiler.StepTraceAnnotation("train", step_num=global_step):
                 state, train_metric, train_rngs = p_train_step(
-                    state, unet_params, text_encoder_params, vae_params, batch, train_rngs
+                    state,
+                    unet_params,
+                    text_encoder_params,
+                    vae_params,
+                    batch,
+                    train_rngs,
                 )
             train_metrics.append(train_metric)
 
@@ -1083,19 +1248,28 @@ def main():
                 and jax.process_index() == 0
             ):
                 _ = log_validation(
-                    pipeline, pipeline_params, state.params, tokenizer, args, validation_rng, weight_dtype
+                    pipeline,
+                    pipeline_params,
+                    state.params,
+                    tokenizer,
+                    args,
+                    validation_rng,
+                    weight_dtype,
                 )
 
             if global_step % args.logging_steps == 0 and jax.process_index() == 0:
                 if args.report_to == "wandb":
                     train_metrics = jax_utils.unreplicate(train_metrics)
-                    train_metrics = jax.tree_util.tree_map(lambda *m: jnp.array(m).mean(), *train_metrics)
+                    train_metrics = jax.tree_util.tree_map(
+                        lambda *m: jnp.array(m).mean(), *train_metrics
+                    )
                     wandb.log(
                         {
                             "walltime": time.monotonic() - t00,
                             "train/step": global_step,
                             "train/epoch": global_step / dataset_length,
-                            "train/steps_per_sec": (global_step - step0) / (time.monotonic() - t0),
+                            "train/steps_per_sec": (global_step - step0)
+                            / (time.monotonic() - t0),
                             **{f"train/{k}": v for k, v in train_metrics.items()},
                         }
                     )
@@ -1109,7 +1283,9 @@ def main():
 
         train_metric = jax_utils.unreplicate(train_metric)
         train_step_progress_bar.close()
-        epochs.write(f"Epoch... ({epoch + 1}/{args.num_train_epochs} | Loss: {train_metric['loss']})")
+        epochs.write(
+            f"Epoch... ({epoch + 1}/{args.num_train_epochs} | Loss: {train_metric['loss']})"
+        )
 
     # Final validation & store model.
     if jax.process_index() == 0:
@@ -1117,7 +1293,13 @@ def main():
             if args.profile_validation:
                 jax.profiler.start_trace(args.output_dir)
             image_logs = log_validation(
-                pipeline, pipeline_params, state.params, tokenizer, args, validation_rng, weight_dtype
+                pipeline,
+                pipeline_params,
+                state.params,
+                tokenizer,
+                args,
+                validation_rng,
+                weight_dtype,
             )
             if args.profile_validation:
                 jax.profiler.stop_trace()
@@ -1144,7 +1326,9 @@ def main():
             )
 
     if args.profile_memory:
-        jax.profiler.save_device_memory_profile(os.path.join(args.output_dir, "memory_final.prof"))
+        jax.profiler.save_device_memory_profile(
+            os.path.join(args.output_dir, "memory_final.prof")
+        )
     logger.info("Finished training.")
 
 
